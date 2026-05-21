@@ -1,0 +1,16 @@
+{
+  "name": "amzinvite-backend",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "db:create": "wrangler d1 create amzinvite-db",
+    "db:schema": "wrangler d1 execute amzinvite-db --remote --file=schema.sql",
+    "db:schema-local": "wrangler d1 execute amzinvite-db --local --file=schema.sql",
+    "tail": "wrangler tail"
+  },
+  "devDependencies": {
+    "wrangler": "^3.99.0"
+  }
+}

@@ -1,0 +1,25 @@
+name = "amzinvite-api"
+main = "src/index.js"
+compatibility_date = "2025-01-01"
+
+# ───────────────────────────────────────────────────────────────────────
+# Bindings
+# ───────────────────────────────────────────────────────────────────────
+
+# D1 database — créée via `wrangler d1 create amzinvite-db`, puis colle
+# l'ID retourné ci-dessous.
+[[d1_databases]]
+binding = "DB"
+database_name = "amzinvite-db"
+database_id = "REPLACE_WITH_D1_ID"
+
+# Secrets : configurés via `wrangler secret put <NAME>`
+# - HMAC_SECRET    : clé partagée avec l'extension (must match background.js)
+# - ADMIN_TOKEN    : pour les endpoints d'upsert depuis ton scraper alerter
+#
+# Pas besoin de les déclarer ici, mais on les liste pour mémoire.
+
+[observability]
+enabled = true
+
+# CORS configuré dans le code (Cloudflare ne le fait pas auto pour Workers)
