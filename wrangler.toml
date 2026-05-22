@@ -11,7 +11,7 @@ compatibility_date = "2025-01-01"
 [[d1_databases]]
 binding = "DB"
 database_name = "amzinvite-db"
-database_id = "REPLACE_WITH_D1_DATABASE_ID"
+database_id = "4e80bd0f-e3b5-44f9-9925-47c1ae621b08"
 
 # Secrets : configurés via `wrangler secret put <NAME>`
 # - HMAC_SECRET    : clé partagée avec l'extension (must match background.js)
