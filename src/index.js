@@ -4,11 +4,11 @@
 //   GET  /api/public/invitations       feed public, cacheable, no auth
 //   POST /api/extension/feedback       feedback signé HMAC, depuis l'extension
 //   POST /api/extension/observations   observations anonymes, depuis l'extension
-//   POST /api/admin/upsert             alimenté par le scraper alerter (token)
+//   POST /api/admin/upsert             alimenté par le job d'alimentation du catalogue
 //
 // Secrets requis (wrangler secret put …) :
 //   HMAC_SECRET   : doit matcher HMAC_SECRET dans background.js de l'extension
-//   ADMIN_TOKEN   : pour le endpoint /api/admin/upsert (depuis ton scraper)
+//   ADMIN_TOKEN   : pour le endpoint /api/admin/upsert
 
 const CORS_HEADERS = {
   "Access-Control-Allow-Origin": "*",
@@ -178,7 +178,7 @@ async function handleObservations(request, env) {
 
 // ─────────────────────────────────────────────────────────────────────────
 // POST /api/admin/upsert
-// Pour le scraper alerter qui pousse les produits en mode invitation.
+// Pour le job d'alimentation qui pousse les produits en mode invitation.
 // Headers: X-Admin-Token: <ADMIN_TOKEN secret>
 // Body: { invitations: [{ asin, url, name, marketplace, first_seen, active }] }
 // ─────────────────────────────────────────────────────────────────────────

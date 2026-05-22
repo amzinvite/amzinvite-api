@@ -4,7 +4,7 @@
 -- Trois tables, toutes anonymisées : aucune donnée perso utilisateur.
 
 -- Le feed public : produits Amazon actuellement en mode invitation,
--- alimenté par le scraper alerter (via POST /api/admin/upsert).
+-- alimenté par le job de synchronisation du catalogue.
 CREATE TABLE IF NOT EXISTS invitations (
   asin           TEXT PRIMARY KEY,
   url            TEXT NOT NULL,
@@ -30,7 +30,7 @@ CREATE TABLE IF NOT EXISTS extension_feedback (
 CREATE INDEX IF NOT EXISTS idx_feedback_asin ON extension_feedback(asin, observed_at DESC);
 CREATE INDEX IF NOT EXISTS idx_feedback_instance ON extension_feedback(instance_id, received_at DESC);
 
--- Observations Amazon (opt-in séparé, ANONYMES, pas d'instance_id)
+-- Observations Amazon (partage anonyme, pas d'instance_id)
 CREATE TABLE IF NOT EXISTS observations (
   id             INTEGER PRIMARY KEY,
   asin           TEXT NOT NULL,
