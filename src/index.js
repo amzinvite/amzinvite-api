@@ -42,6 +42,9 @@ export default {
       if (url.pathname === "/api/admin/upsert" && request.method === "POST") {
         return await handleAdminUpsert(request, env);
       }
+      if (url.pathname === "/api/admin/sync" && request.method === "GET") {
+        return await handleAdminSync(request, env);
+      }
       if (url.pathname === "/" || url.pathname === "/healthz") {
         return json({ ok: true, service: "amzinvite-api" });
       }
@@ -218,6 +221,53 @@ async function handleAdminUpsert(request, env) {
   await env.DB.batch(stmts);
 
   return json({ ok: true, upserted: stmts.length });
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// GET /api/admin/sync
+// Expose les feedbacks et observations agrégés pour consommation par alerter.
+// Headers: X-Admin-Token: <ADMIN_TOKEN secret>
+// Query:   ?since=<epoch_seconds>  (défaut: dernières 24h)
+// ─────────────────────────────────────────────────────────────────────────
+async function handleAdminSync(request, env) {
+  const token = request.headers.get("X-Admin-Token");
+  if (!token || token !== env.ADMIN_TOKEN) {
+    return json({ error: "unauthorized" }, 401);
+  }
+
+  const sinceParam = new URL(request.url).searchParams.get("since");
+  const since = sinceParam ? parseInt(sinceParam, 10) : Math.floor(Date.now() / 1000) - 86400;
+
+  // Feedback : toutes les entrées récentes groupées par asin + state
+  const feedbackResult = await env.DB.prepare(
+    `SELECT asin, state, COUNT(*) as count, MAX(observed_at) as last_seen
+     FROM extension_feedback
+     WHERE received_at > ?
+     GROUP BY asin, state
+     ORDER BY last_seen DESC
+     LIMIT 2000`,
+  ).bind(since).all();
+
+  // Observations : la plus récente par asin (via sous-requête pour garder les bonnes colonnes)
+  const obsResult = await env.DB.prepare(
+    `SELECT o.asin, o.name, o.price_cents, o.in_stock, o.stock_status, o.image_url, o.marketplace, o.received_at as last_seen
+     FROM observations o
+     INNER JOIN (
+       SELECT asin, MAX(received_at) as max_ts
+       FROM observations
+       WHERE received_at > ?
+       GROUP BY asin
+     ) latest ON o.asin = latest.asin AND o.received_at = latest.max_ts
+     ORDER BY last_seen DESC
+     LIMIT 2000`,
+  ).bind(since).all();
+
+  return json({
+    feedback: feedbackResult.results || [],
+    observations: obsResult.results || [],
+    since,
+    generated_at: Math.floor(Date.now() / 1000),
+  });
 }
 
 // ─────────────────────────────────────────────────────────────────────────
