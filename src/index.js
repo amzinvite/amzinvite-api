@@ -199,8 +199,14 @@ async function handleAdminUpsert(request, env) {
   }
 
   const now = Math.floor(Date.now() / 1000);
+  const normalizedInvitations = payload.invitations
+    .filter((inv) => inv?.asin)
+    .map((inv) => ({
+      ...inv,
+      asin: String(inv.asin).toUpperCase(),
+    }));
   // Upsert : INSERT OR REPLACE garde le first_seen original via subquery.
-  const stmts = payload.invitations.map((inv) => env.DB.prepare(
+  const stmts = normalizedInvitations.map((inv) => env.DB.prepare(
     `INSERT INTO invitations (asin, url, name, marketplace, first_seen, last_updated, active)
      VALUES (?, ?, ?, ?, COALESCE((SELECT first_seen FROM invitations WHERE asin = ?), ?), ?, ?)
      ON CONFLICT(asin) DO UPDATE SET
@@ -209,16 +215,33 @@ async function handleAdminUpsert(request, env) {
        last_updated = excluded.last_updated,
        active = excluded.active`,
   ).bind(
-    inv.asin.toUpperCase(),
+    inv.asin,
     inv.url,
     inv.name || null,
     inv.marketplace || "amazon.fr",
-    inv.asin.toUpperCase(),
+    inv.asin,
     inv.first_seen || now,
     now,
     inv.active === false ? 0 : 1,
   ));
-  await env.DB.batch(stmts);
+  if (stmts.length) {
+    await env.DB.batch(stmts);
+  }
+
+  const asinPlaceholders = normalizedInvitations.map(() => "?").join(", ");
+  const deactivateMissing = normalizedInvitations.length
+    ? env.DB.prepare(
+      `UPDATE invitations
+       SET active = 0, last_updated = ?
+       WHERE active = 1
+         AND asin NOT IN (${asinPlaceholders})`,
+    ).bind(now, ...normalizedInvitations.map((inv) => inv.asin))
+    : env.DB.prepare(
+      `UPDATE invitations
+       SET active = 0, last_updated = ?
+       WHERE active = 1`,
+    ).bind(now);
+  await deactivateMissing.run();
 
   return json({ ok: true, upserted: stmts.length });
 }
