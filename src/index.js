@@ -159,8 +159,16 @@ async function handleObservations(request, env) {
   }
 
   const now = Math.floor(Date.now() / 1000);
+  // Dédoublonner par ASIN — garder le dernier item de chaque ASIN
+  const seen = new Map();
+  for (const it of payload.items.slice(0, 100)) {
+    const asin = (it.external_id || it.asin || "").toUpperCase();
+    if (asin) seen.set(asin, it);
+  }
+  const dedupedItems = Array.from(seen.values());
+
   // D1 batch insert
-  const stmts = payload.items.slice(0, 100).map((it) => env.DB.prepare(
+  const stmts = dedupedItems.map((it) => env.DB.prepare(
     `INSERT INTO observations (asin, name, price_cents, in_stock, stock_status, image_url, marketplace, day_bucket, received_at)
      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
   ).bind(
@@ -176,7 +184,7 @@ async function handleObservations(request, env) {
   ));
   await env.DB.batch(stmts);
 
-  return json({ ok: true, inserted: stmts.length });
+  return json({ ok: true, inserted: stmts.length, deduped: payload.items.length - dedupedItems.length });
 }
 
 // ─────────────────────────────────────────────────────────────────────────
