@@ -261,17 +261,21 @@ async function handleAdminSync(request, env) {
   const sinceParam = new URL(request.url).searchParams.get("since");
   const since = sinceParam ? parseInt(sinceParam, 10) : Math.floor(Date.now() / 1000) - 86400;
 
-  // Feedback : toutes les entrées récentes groupées par asin + state
+  // Feedback : la plus récente par asin
   const feedbackResult = await env.DB.prepare(
-    `SELECT asin, state, COUNT(*) as count, MAX(observed_at) as last_seen
-     FROM extension_feedback
-     WHERE received_at > ?
-     GROUP BY asin, state
+    `SELECT f.asin, f.observed_at as last_seen
+     FROM extension_feedback f
+     INNER JOIN (
+       SELECT asin, MAX(observed_at) as max_ts
+       FROM extension_feedback
+       WHERE received_at > ?
+       GROUP BY asin
+     ) latest ON f.asin = latest.asin AND f.observed_at = latest.max_ts
      ORDER BY last_seen DESC
      LIMIT 2000`,
   ).bind(since).all();
 
-  // Observations : la plus récente par asin (via sous-requête pour garder les bonnes colonnes)
+  // Observations : la plus récente par asin
   const obsResult = await env.DB.prepare(
     `SELECT o.asin, o.name, o.price_cents, o.in_stock, o.stock_status, o.image_url, o.marketplace, o.received_at as last_seen
      FROM observations o
