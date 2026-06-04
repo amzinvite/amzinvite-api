@@ -269,30 +269,27 @@ async function handleAdminSync(request, env) {
   const sinceParam = new URL(request.url).searchParams.get("since");
   const since = sinceParam ? parseInt(sinceParam, 10) : Math.floor(Date.now() / 1000) - 86400;
 
-  // Feedback : la plus récente par asin
+  // Feedback : la plus récente par asin (une seule ligne, même si timestamps égaux)
   const feedbackResult = await env.DB.prepare(
-    `SELECT f.asin, f.observed_at as last_seen
-     FROM extension_feedback f
-     INNER JOIN (
-       SELECT asin, MAX(observed_at) as max_ts
-       FROM extension_feedback
-       WHERE received_at > ?
-       GROUP BY asin
-     ) latest ON f.asin = latest.asin AND f.observed_at = latest.max_ts
+    `SELECT asin, last_seen FROM (
+       SELECT f.asin, f.observed_at as last_seen,
+              ROW_NUMBER() OVER (PARTITION BY f.asin ORDER BY f.observed_at DESC, f.id DESC) as rn
+       FROM extension_feedback f
+       WHERE f.received_at > ?
+     ) WHERE rn = 1
      ORDER BY last_seen DESC
      LIMIT 2000`,
   ).bind(since).all();
 
-  // Observations : la plus récente par asin
+  // Observations : la plus récente par asin (une seule ligne, même si timestamps égaux)
   const obsResult = await env.DB.prepare(
-    `SELECT o.asin, o.name, o.price_cents, o.in_stock, o.stock_status, o.image_url, o.marketplace, o.received_at as last_seen
-     FROM observations o
-     INNER JOIN (
-       SELECT asin, MAX(received_at) as max_ts
-       FROM observations
-       WHERE received_at > ?
-       GROUP BY asin
-     ) latest ON o.asin = latest.asin AND o.received_at = latest.max_ts
+    `SELECT asin, name, price_cents, in_stock, stock_status, image_url, marketplace, last_seen FROM (
+       SELECT o.asin, o.name, o.price_cents, o.in_stock, o.stock_status, o.image_url, o.marketplace,
+              o.received_at as last_seen,
+              ROW_NUMBER() OVER (PARTITION BY o.asin ORDER BY o.received_at DESC, o.id DESC) as rn
+       FROM observations o
+       WHERE o.received_at > ?
+     ) WHERE rn = 1
      ORDER BY last_seen DESC
      LIMIT 2000`,
   ).bind(since).all();
