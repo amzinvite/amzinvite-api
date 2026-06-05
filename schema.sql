@@ -44,3 +44,14 @@ CREATE TABLE IF NOT EXISTS observations (
   received_at    INTEGER NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_observations_asin_day ON observations(asin, day_bucket);
+
+-- Compteurs courts pour rate-limit backend-only.
+-- Les buckets sont des minutes/heures epoch selon la clé.
+CREATE TABLE IF NOT EXISTS rate_events (
+  key            TEXT NOT NULL,
+  bucket         INTEGER NOT NULL,
+  count          INTEGER DEFAULT 1,
+  updated_at     INTEGER NOT NULL,
+  PRIMARY KEY (key, bucket)
+);
+CREATE INDEX IF NOT EXISTS idx_rate_events_updated_at ON rate_events(updated_at);

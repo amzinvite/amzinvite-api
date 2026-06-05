@@ -18,8 +18,10 @@ const CORS_HEADERS = {
 };
 
 const HMAC_MAX_DRIFT_SEC = 300; // ±5 min
-const RATE_LIMIT_PER_INSTANCE_HOUR = 200;
-const RATE_LIMIT_PER_IP_MINUTE = 30;
+const MAX_EXTENSION_BODY_BYTES = 128 * 1024;
+const RATE_LIMIT_FEEDBACK_PER_INSTANCE_HOUR = 500;
+const RATE_LIMIT_OBSERVATIONS_PER_IP_MINUTE = 60;
+const RATE_LIMIT_OBSERVATIONS_PER_ASIN_MINUTE = 120;
 
 export default {
   async fetch(request, env, ctx) {
@@ -88,7 +90,9 @@ async function handleFeedback(request, env) {
     return json({ error: "bad_instance_id" }, 400);
   }
 
-  const bodyText = await request.text();
+  const body = await readLimitedText(request);
+  if (!body.ok) return json({ error: body.error }, body.status);
+  const bodyText = body.text;
   const verified = await verifyHmac(request, bodyText, env);
   if (!verified.ok) return json({ error: verified.error }, 400);
 
@@ -105,12 +109,14 @@ async function handleFeedback(request, env) {
 
   const ipHash = await sha256(request.headers.get("CF-Connecting-IP") || "");
 
-  // Rate-limit basique : compte les requêtes des dernières 60 minutes par instance.
-  const since = Math.floor(Date.now() / 1000) - 3600;
-  const count = await env.DB.prepare(
-    `SELECT COUNT(*) as n FROM extension_feedback WHERE instance_id = ? AND received_at > ?`,
-  ).bind(instanceId, since).first();
-  if (count?.n > RATE_LIMIT_PER_INSTANCE_HOUR) {
+  const hourBucket = Math.floor(Date.now() / 3600000);
+  const instanceLimit = await consumeRateLimit(
+    env,
+    `instance:feedback:${instanceId}`,
+    hourBucket,
+    RATE_LIMIT_FEEDBACK_PER_INSTANCE_HOUR,
+  );
+  if (!instanceLimit.ok) {
     return json({ error: "rate_limit" }, 429);
   }
 
@@ -136,7 +142,9 @@ async function handleFeedback(request, env) {
 // Body: { items: [{ asin, name, price, in_stock, stock_status, ... }], dayBucket }
 // ─────────────────────────────────────────────────────────────────────────
 async function handleObservations(request, env) {
-  const bodyText = await request.text();
+  const body = await readLimitedText(request);
+  if (!body.ok) return json({ error: body.error }, body.status);
+  const bodyText = body.text;
   const verified = await verifyHmac(request, bodyText, env);
   if (!verified.ok) return json({ error: verified.error }, 400);
 
@@ -148,13 +156,15 @@ async function handleObservations(request, env) {
     return json({ error: "empty_items" }, 400);
   }
 
-  // Rate-limit IP (anti-flood)
   const ipHash = await sha256(request.headers.get("CF-Connecting-IP") || "");
-  const sinceMin = Math.floor(Date.now() / 1000) - 60;
-  const ipCount = await env.DB.prepare(
-    `SELECT COUNT(*) as n FROM observations WHERE day_bucket = ? AND received_at > ?`,
-  ).bind(payload.dayBucket || "", sinceMin).first();
-  if (ipCount?.n > RATE_LIMIT_PER_IP_MINUTE * 50) {
+  const minuteBucket = Math.floor(Date.now() / 60000);
+  const ipLimit = await consumeRateLimit(
+    env,
+    `ip:observations:${ipHash}`,
+    minuteBucket,
+    RATE_LIMIT_OBSERVATIONS_PER_IP_MINUTE,
+  );
+  if (!ipLimit.ok) {
     return json({ error: "rate_limit" }, 429);
   }
 
@@ -163,12 +173,31 @@ async function handleObservations(request, env) {
   const seen = new Map();
   for (const it of payload.items.slice(0, 100)) {
     const asin = (it.external_id || it.asin || "").toUpperCase();
-    if (asin) seen.set(asin, it);
+    if (/^[A-Z0-9]{10}$/i.test(asin)) seen.set(asin, it);
   }
   const dedupedItems = Array.from(seen.values());
+  const acceptedItems = [];
+  let asinThrottled = 0;
+  for (const it of dedupedItems) {
+    const asin = (it.external_id || it.asin || "").toUpperCase();
+    const asinLimit = await consumeRateLimit(
+      env,
+      `asin:observations:${asin}`,
+      minuteBucket,
+      RATE_LIMIT_OBSERVATIONS_PER_ASIN_MINUTE,
+    );
+    if (asinLimit.ok) {
+      acceptedItems.push(it);
+    } else {
+      asinThrottled++;
+    }
+  }
+  if (acceptedItems.length === 0) {
+    return json({ ok: true, inserted: 0, deduped: payload.items.length - dedupedItems.length, throttled: asinThrottled });
+  }
 
   // D1 batch insert
-  const stmts = dedupedItems.map((it) => env.DB.prepare(
+  const stmts = acceptedItems.map((it) => env.DB.prepare(
     `INSERT INTO observations (asin, name, price_cents, in_stock, stock_status, image_url, marketplace, day_bucket, received_at)
      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
   ).bind(
@@ -184,7 +213,7 @@ async function handleObservations(request, env) {
   ));
   await env.DB.batch(stmts);
 
-  return json({ ok: true, inserted: stmts.length, deduped: payload.items.length - dedupedItems.length });
+  return json({ ok: true, inserted: stmts.length, deduped: payload.items.length - dedupedItems.length, throttled: asinThrottled });
 }
 
 // ─────────────────────────────────────────────────────────────────────────
@@ -305,6 +334,36 @@ async function handleAdminSync(request, env) {
 // ─────────────────────────────────────────────────────────────────────────
 // Utilitaires
 // ─────────────────────────────────────────────────────────────────────────
+
+async function readLimitedText(request, maxBytes = MAX_EXTENSION_BODY_BYTES) {
+  const contentLength = request.headers.get("Content-Length");
+  if (contentLength && Number(contentLength) > maxBytes) {
+    return { ok: false, error: "payload_too_large", status: 413 };
+  }
+
+  const text = await request.text();
+  if (new TextEncoder().encode(text).length > maxBytes) {
+    return { ok: false, error: "payload_too_large", status: 413 };
+  }
+  return { ok: true, text };
+}
+
+async function consumeRateLimit(env, key, bucket, limit) {
+  const now = Math.floor(Date.now() / 1000);
+  await env.DB.prepare(
+    `INSERT OR IGNORE INTO rate_events (key, bucket, count, updated_at)
+     VALUES (?, ?, 0, ?)`,
+  ).bind(key, bucket, now).run();
+  await env.DB.prepare(
+    `UPDATE rate_events
+     SET count = count + 1, updated_at = ?
+     WHERE key = ? AND bucket = ?`,
+  ).bind(now, key, bucket).run();
+  const row = await env.DB.prepare(
+    `SELECT count FROM rate_events WHERE key = ? AND bucket = ?`,
+  ).bind(key, bucket).first();
+  return { ok: (row?.count || 0) <= limit, count: row?.count || 0 };
+}
 
 async function verifyHmac(request, bodyText, env) {
   const sig = request.headers.get("X-Sig");
