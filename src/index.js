@@ -22,6 +22,7 @@ const MAX_EXTENSION_BODY_BYTES = 128 * 1024;
 const RATE_LIMIT_FEEDBACK_PER_INSTANCE_HOUR = 500;
 const RATE_LIMIT_OBSERVATIONS_PER_IP_MINUTE = 60;
 const RATE_LIMIT_OBSERVATIONS_PER_ASIN_MINUTE = 120;
+const RATE_LIMIT_PUBLIC_FEED_PER_IP_MINUTE = 60;
 
 export default {
   async fetch(request, env, ctx) {
@@ -33,7 +34,7 @@ export default {
 
     try {
       if (url.pathname === "/api/public/invitations" && request.method === "GET") {
-        return await handlePublicFeed(env);
+        return await handlePublicFeed(request, env);
       }
       if (url.pathname === "/api/extension/feedback" && request.method === "POST") {
         return await handleFeedback(request, env);
@@ -60,7 +61,19 @@ export default {
 // ─────────────────────────────────────────────────────────────────────────
 // GET /api/public/invitations
 // ─────────────────────────────────────────────────────────────────────────
-async function handlePublicFeed(env) {
+async function handlePublicFeed(request, env) {
+  const ipHash = await sha256(request.headers.get("CF-Connecting-IP") || "");
+  const minuteBucket = Math.floor(Date.now() / 60000);
+  const ipLimit = await consumeRateLimit(
+    env,
+    `ip:public_feed:${ipHash}`,
+    minuteBucket,
+    RATE_LIMIT_PUBLIC_FEED_PER_IP_MINUTE,
+  );
+  if (!ipLimit.ok) {
+    return json({ error: "rate_limit" }, 429);
+  }
+
   const result = await env.DB.prepare(
     `SELECT asin, url, name, marketplace, first_seen
      FROM invitations
@@ -224,7 +237,7 @@ async function handleObservations(request, env) {
 // ─────────────────────────────────────────────────────────────────────────
 async function handleAdminUpsert(request, env) {
   const token = request.headers.get("X-Admin-Token");
-  if (!token || token !== env.ADMIN_TOKEN) {
+  if (!token || !constantTimeEqual(token, env.ADMIN_TOKEN || "")) {
     return json({ error: "unauthorized" }, 401);
   }
 
@@ -291,7 +304,7 @@ async function handleAdminUpsert(request, env) {
 // ─────────────────────────────────────────────────────────────────────────
 async function handleAdminSync(request, env) {
   const token = request.headers.get("X-Admin-Token");
-  if (!token || token !== env.ADMIN_TOKEN) {
+  if (!token || !constantTimeEqual(token, env.ADMIN_TOKEN || "")) {
     return json({ error: "unauthorized" }, 401);
   }
 
