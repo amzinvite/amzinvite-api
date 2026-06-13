@@ -1,7 +1,7 @@
 // amzinvite-api — Cloudflare Worker
 //
 // 4 endpoints exposés :
-//   GET  /api/public/invitations       feed public, cacheable, no auth
+//   GET  /api/public/invitations       feed curé, requête signée HMAC (anti-scraping)
 //   POST /api/extension/feedback       feedback signé HMAC, depuis l'extension
 //   POST /api/extension/observations   observations anonymes, depuis l'extension
 //   POST /api/admin/upsert             alimenté par le job d'alimentation du catalogue
@@ -18,6 +18,7 @@ const CORS_HEADERS = {
 };
 
 const HMAC_MAX_DRIFT_SEC = 300; // ±5 min
+const FEED_SIG_PAYLOAD = "/api/public/invitations"; // doit matcher l'extension
 const MAX_EXTENSION_BODY_BYTES = 128 * 1024;
 const RATE_LIMIT_FEEDBACK_PER_INSTANCE_HOUR = 500;
 const RATE_LIMIT_OBSERVATIONS_PER_IP_MINUTE = 60;
@@ -74,6 +75,20 @@ async function handlePublicFeed(request, env) {
     return json({ error: "rate_limit" }, 429);
   }
 
+  // Le feed expose la liste curée d'ASIN/URL : on exige une requête signée
+  // par l'extension (même schéma HMAC que le feedback) pour éviter qu'un
+  // simple `curl` de l'URL ne récupère la liste. La signature porte sur le
+  // path (pas de body en GET). Le secret reste extractible côté navigateur,
+  // mais ça bloque le scraping anonyme trivial.
+  const instanceId = request.headers.get("X-Instance-Id");
+  if (!instanceId || !/^[0-9a-f-]{32,40}$/i.test(instanceId)) {
+    return json({ error: "bad_instance_id" }, 401);
+  }
+  const verified = await verifyHmac(request, FEED_SIG_PAYLOAD, env);
+  if (!verified.ok) {
+    return json({ error: verified.error }, 401);
+  }
+
   const result = await env.DB.prepare(
     `SELECT asin, url, name, marketplace, first_seen
      FROM invitations
@@ -86,8 +101,10 @@ async function handlePublicFeed(request, env) {
     headers: {
       ...CORS_HEADERS,
       "Content-Type": "application/json",
-      // Cache 5 min sur le edge CDN Cloudflare
-      "Cache-Control": "public, max-age=300, s-maxage=300",
+      // Réponse signée/par-instance : surtout pas de cache CDN partagé,
+      // sinon Cloudflare resservirait le JSON en clair sans vérifier la
+      // signature (le cache ne varie pas sur les en-têtes).
+      "Cache-Control": "no-store",
     },
   });
 }

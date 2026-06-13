@@ -14,7 +14,7 @@ Ce service :
 
 | Méthode | Path | Description |
 |---|---|---|
-| `GET` | `/api/public/invitations` | Feed public |
+| `GET` | `/api/public/invitations` | Feed curé (requête signée HMAC, non cachable) |
 | `POST` | `/api/extension/feedback` | Détections anonymes envoyées par l'extension |
 | `POST` | `/api/extension/observations` | Observations anonymes envoyées par l'extension |
 | `POST` | `/api/admin/upsert` | Synchronisation du catalogue |
