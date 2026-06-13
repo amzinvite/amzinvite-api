@@ -19,6 +19,14 @@ database_id = "4e80bd0f-e3b5-44f9-9925-47c1ae621b08"
 #
 # Pas besoin de les déclarer ici, mais on les liste pour mémoire.
 
+# Période de grâce pour la signature du feed public :
+#   "false" (défaut) → accepte les requêtes signées ET non signées, le temps
+#                       que le Chrome Web Store pousse l'extension ≥0.1.14.
+#   "true"           → strict, les requêtes non signées sont rejetées (401).
+# Passer à "true" puis redéployer une fois l'extension signée largement adoptée.
+[vars]
+FEED_AUTH_ENFORCE = "false"
+
 [observability]
 enabled = true
 

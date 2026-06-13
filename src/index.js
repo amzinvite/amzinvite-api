@@ -80,13 +80,13 @@ async function handlePublicFeed(request, env) {
   // simple `curl` de l'URL ne récupère la liste. La signature porte sur le
   // path (pas de body en GET). Le secret reste extractible côté navigateur,
   // mais ça bloque le scraping anonyme trivial.
-  const instanceId = request.headers.get("X-Instance-Id");
-  if (!instanceId || !/^[0-9a-f-]{32,40}$/i.test(instanceId)) {
-    return json({ error: "bad_instance_id" }, 401);
-  }
-  const verified = await verifyHmac(request, FEED_SIG_PAYLOAD, env);
-  if (!verified.ok) {
-    return json({ error: verified.error }, 401);
+  //
+  // Période de grâce : tant que FEED_AUTH_ENFORCE !== "true", on n'échoue pas
+  // sur une requête non signée (extension < 0.1.14 encore déployée).
+  const enforce = env.FEED_AUTH_ENFORCE === "true";
+  const auth = await checkFeedAuth(request, env);
+  if (!auth.ok && enforce) {
+    return json({ error: auth.error }, 401);
   }
 
   const result = await env.DB.prepare(
@@ -393,6 +393,14 @@ async function consumeRateLimit(env, key, bucket, limit) {
     `SELECT count FROM rate_events WHERE key = ? AND bucket = ?`,
   ).bind(key, bucket).first();
   return { ok: (row?.count || 0) <= limit, count: row?.count || 0 };
+}
+
+async function checkFeedAuth(request, env) {
+  const instanceId = request.headers.get("X-Instance-Id");
+  if (!instanceId || !/^[0-9a-f-]{32,40}$/i.test(instanceId)) {
+    return { ok: false, error: "bad_instance_id" };
+  }
+  return verifyHmac(request, FEED_SIG_PAYLOAD, env);
 }
 
 async function verifyHmac(request, bodyText, env) {

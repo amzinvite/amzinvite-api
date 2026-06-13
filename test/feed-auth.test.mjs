@@ -12,7 +12,7 @@ const FEED_PATH = "/api/public/invitations";
 const INSTANCE = "0123456789abcdef0123456789abcdef";
 
 // ─── Mock D1 : route selon le SQL ──────────────────────────────────────────
-function makeEnv({ feedRows = [{ asin: "B0TEST00001", url: "https://www.amazon.fr/dp/B0TEST00001" }] } = {}) {
+function makeEnv({ feedRows = [{ asin: "B0TEST00001", url: "https://www.amazon.fr/dp/B0TEST00001" }], enforce = true } = {}) {
   const db = {
     prepare(sql) {
       return {
@@ -29,7 +29,7 @@ function makeEnv({ feedRows = [{ asin: "B0TEST00001", url: "https://www.amazon.f
       };
     },
   };
-  return { DB: db, HMAC_SECRET: SECRET };
+  return { DB: db, HMAC_SECRET: SECRET, FEED_AUTH_ENFORCE: enforce ? "true" : "false" };
 }
 
 async function hmacHex(secret, data) {
@@ -90,6 +90,13 @@ await test("accepte une requête correctement signée → 200 + données", async
   const body = await res.json();
   assert.ok(Array.isArray(body) && body.length === 1);
   assert.equal(body[0].asin, "B0TEST00001");
+});
+
+await test("période de grâce (enforce=false) : requête non signée → 200", async () => {
+  const res = await worker.fetch(feedRequest(), makeEnv({ enforce: false }), {});
+  assert.equal(res.status, 200);
+  const body = await res.json();
+  assert.ok(Array.isArray(body) && body.length === 1);
 });
 
 await test("réponse signée → pas de cache CDN partagé (no-store)", async () => {
