@@ -271,12 +271,15 @@ async function handleAdminUpsert(request, env) {
     .map((inv) => ({
       ...inv,
       asin: String(inv.asin).toUpperCase(),
+      first_seen: Number.isFinite(Number(inv.first_seen)) ? Number(inv.first_seen) : null,
     }));
-  // Upsert : INSERT OR REPLACE garde le first_seen original via subquery.
+  // Upsert : si alerter fournit first_seen, il devient la source canonique.
+  // Sinon on conserve le first_seen déjà stocké, avec fallback sur now.
   const stmts = normalizedInvitations.map((inv) => env.DB.prepare(
     `INSERT INTO invitations (asin, url, name, marketplace, first_seen, last_updated, active)
-     VALUES (?, ?, ?, ?, COALESCE((SELECT first_seen FROM invitations WHERE asin = ?), ?), ?, ?)
+     VALUES (?, ?, ?, ?, COALESCE(?, (SELECT first_seen FROM invitations WHERE asin = ?), ?), ?, ?)
      ON CONFLICT(asin) DO UPDATE SET
+       first_seen = excluded.first_seen,
        url = excluded.url,
        name = excluded.name,
        last_updated = excluded.last_updated,
@@ -286,8 +289,9 @@ async function handleAdminUpsert(request, env) {
     inv.url,
     inv.name || null,
     inv.marketplace || "amazon.fr",
+    inv.first_seen,
     inv.asin,
-    inv.first_seen || now,
+    now,
     now,
     inv.active === false ? 0 : 1,
   ));
