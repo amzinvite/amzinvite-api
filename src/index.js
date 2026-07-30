@@ -1,7 +1,8 @@
 // amzinvite-api — Cloudflare Worker
 //
-// 4 endpoints exposés :
+// 5 endpoints exposés :
 //   GET  /api/public/invitations       feed curé, requête signée HMAC (anti-scraping)
+//   POST /api/extension/register       délivre un credential HMAC aléatoire
 //   POST /api/extension/feedback       feedback signé HMAC, depuis l'extension
 //   POST /api/extension/observations   observations anonymes, depuis l'extension
 //   POST /api/admin/upsert             alimenté par le job d'alimentation du catalogue
@@ -13,7 +14,7 @@
 const CORS_HEADERS = {
   "Access-Control-Allow-Origin": "*",
   "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
-  "Access-Control-Allow-Headers": "Content-Type, X-Instance-Id, X-Ts, X-Sig, X-Admin-Token",
+  "Access-Control-Allow-Headers": "Content-Type, X-Instance-Id, X-Auth-Version, X-Credential-Id, X-Ts, X-Sig, X-Admin-Token",
   "Access-Control-Max-Age": "86400",
 };
 
@@ -24,6 +25,8 @@ const RATE_LIMIT_FEEDBACK_PER_INSTANCE_HOUR = 500;
 const RATE_LIMIT_OBSERVATIONS_PER_IP_MINUTE = 60;
 const RATE_LIMIT_OBSERVATIONS_PER_ASIN_MINUTE = 120;
 const RATE_LIMIT_PUBLIC_FEED_PER_IP_MINUTE = 60;
+const RATE_LIMIT_REGISTRATIONS_PER_IP_HOUR = 20;
+const OBSERVATION_CREDENTIAL_TTL_SEC = 48 * 60 * 60;
 
 export default {
   async fetch(request, env, ctx) {
@@ -36,6 +39,9 @@ export default {
     try {
       if (url.pathname === "/api/public/invitations" && request.method === "GET") {
         return await handlePublicFeed(request, env);
+      }
+      if (url.pathname === "/api/extension/register" && request.method === "POST") {
+        return await handleCredentialRegistration(request, env);
       }
       if (url.pathname === "/api/extension/feedback" && request.method === "POST") {
         return await handleFeedback(request, env);
@@ -58,6 +64,67 @@ export default {
     }
   },
 };
+
+// ─────────────────────────────────────────────────────────────────────────
+// POST /api/extension/register
+// Délivre un secret HMAC aléatoire. Le scope "instance" est lié à l'UUID
+// anonyme de l'extension ; le scope "observations" expire rapidement et ne
+// contient aucun identifiant d'installation.
+// ─────────────────────────────────────────────────────────────────────────
+async function handleCredentialRegistration(request, env) {
+  const body = await readLimitedText(request);
+  if (!body.ok) return json({ error: body.error }, body.status);
+
+  let payload;
+  try { payload = JSON.parse(body.text); }
+  catch { return json({ error: "bad_json" }, 400); }
+
+  const scope = payload?.scope;
+  if (!["instance", "observations"].includes(scope)) {
+    return json({ error: "bad_scope" }, 400);
+  }
+  const instanceId = scope === "instance" ? payload.instanceId : null;
+  if (scope === "instance" && !/^[0-9a-f-]{32,40}$/i.test(instanceId || "")) {
+    return json({ error: "bad_instance_id" }, 400);
+  }
+
+  const ipHash = await sha256(request.headers.get("CF-Connecting-IP") || "");
+  const hourBucket = Math.floor(Date.now() / 3600000);
+  const registrationLimit = await consumeRateLimit(
+    env,
+    `ip:credential_registration:${ipHash}`,
+    hourBucket,
+    RATE_LIMIT_REGISTRATIONS_PER_IP_HOUR,
+  );
+  if (!registrationLimit.ok) {
+    return json({ error: "rate_limit" }, 429);
+  }
+
+  const credentialId = crypto.randomUUID();
+  const secret = randomBase64Url(32);
+  const now = Math.floor(Date.now() / 1000);
+  const expiresAt = scope === "observations" ? now + OBSERVATION_CREDENTIAL_TTL_SEC : null;
+  // Le prochain enrôlement purge les credentials courts déjà expirés. Les
+  // clients renouvellent 6 h avant l'échéance, donc aucune clé active n'est
+  // supprimée et la table ne croît pas indéfiniment.
+  await env.DB.prepare(
+    `DELETE FROM extension_credentials
+     WHERE expires_at IS NOT NULL
+       AND expires_at <= ?`,
+  ).bind(now).run();
+  await env.DB.prepare(
+    `INSERT INTO extension_credentials
+       (credential_id, secret, scope, instance_id, created_at, expires_at, last_used_at, revoked)
+     VALUES (?, ?, ?, ?, ?, ?, NULL, 0)`,
+  ).bind(credentialId, secret, scope, instanceId, now, expiresAt).run();
+
+  return json({
+    scope,
+    credentialId,
+    secret,
+    expiresAt: expiresAt == null ? null : expiresAt * 1000,
+  }, 201, { "Cache-Control": "no-store" });
+}
 
 // ─────────────────────────────────────────────────────────────────────────
 // GET /api/public/invitations
@@ -123,8 +190,13 @@ async function handleFeedback(request, env) {
   const body = await readLimitedText(request);
   if (!body.ok) return json({ error: body.error }, body.status);
   const bodyText = body.text;
-  const verified = await verifyHmac(request, bodyText, env);
-  if (!verified.ok) return json({ error: verified.error }, 400);
+  const verified = await verifyExtensionHmac(request, bodyText, env, {
+    scope: "instance",
+    instanceId,
+  });
+  if (!verified.ok) {
+    return json({ error: verified.error }, request.headers.get("X-Auth-Version") === "2" ? 401 : 400);
+  }
 
   let payload;
   try { payload = JSON.parse(bodyText); }
@@ -175,8 +247,12 @@ async function handleObservations(request, env) {
   const body = await readLimitedText(request);
   if (!body.ok) return json({ error: body.error }, body.status);
   const bodyText = body.text;
-  const verified = await verifyHmac(request, bodyText, env);
-  if (!verified.ok) return json({ error: verified.error }, 400);
+  const verified = await verifyExtensionHmac(request, bodyText, env, {
+    scope: "observations",
+  });
+  if (!verified.ok) {
+    return json({ error: verified.error }, request.headers.get("X-Auth-Version") === "2" ? 401 : 400);
+  }
 
   let payload;
   try { payload = JSON.parse(bodyText); }
@@ -404,10 +480,70 @@ async function checkFeedAuth(request, env) {
   if (!instanceId || !/^[0-9a-f-]{32,40}$/i.test(instanceId)) {
     return { ok: false, error: "bad_instance_id" };
   }
-  return verifyHmac(request, FEED_SIG_PAYLOAD, env);
+  const auth = await verifyExtensionHmac(request, FEED_SIG_PAYLOAD, env, {
+    scope: "instance",
+    instanceId,
+  });
+  if (auth.ok) {
+    await recordAuthActivity(env, instanceId, auth.version || 1);
+  }
+  return auth;
 }
 
-async function verifyHmac(request, bodyText, env) {
+async function recordAuthActivity(env, instanceId, authVersion) {
+  const now = Math.floor(Date.now() / 1000);
+  await env.DB.prepare(
+    `INSERT INTO extension_auth_activity (instance_id, auth_version, last_seen)
+     VALUES (?, ?, ?)
+     ON CONFLICT(instance_id) DO UPDATE SET
+       auth_version = excluded.auth_version,
+       last_seen = excluded.last_seen
+     WHERE extension_auth_activity.auth_version != excluded.auth_version
+        OR extension_auth_activity.last_seen < ?`,
+  ).bind(instanceId, authVersion, now, now - 3600).run();
+}
+
+async function verifyExtensionHmac(request, bodyText, env, { scope, instanceId = null }) {
+  const authVersion = request.headers.get("X-Auth-Version");
+  const credentialId = request.headers.get("X-Credential-Id");
+  if (authVersion === "2" || credentialId) {
+    if (authVersion !== "2" || !/^[0-9a-f-]{36}$/i.test(credentialId || "")) {
+      return { ok: false, error: "bad_v2_headers" };
+    }
+    const credential = await env.DB.prepare(
+      `SELECT secret, scope, instance_id, expires_at, revoked
+       FROM extension_credentials
+       WHERE credential_id = ?`,
+    ).bind(credentialId).first();
+    if (!credential || credential.revoked) {
+      return { ok: false, error: "unknown_credential" };
+    }
+    if (credential.scope !== scope || (instanceId && credential.instance_id !== instanceId)) {
+      return { ok: false, error: "credential_scope_mismatch" };
+    }
+    const now = Math.floor(Date.now() / 1000);
+    if (credential.expires_at != null && credential.expires_at <= now) {
+      return { ok: false, error: "expired_credential" };
+    }
+    const verified = await verifyHmacWithSecret(request, bodyText, credential.secret);
+    if (!verified.ok) return verified;
+    await env.DB.prepare(
+      `UPDATE extension_credentials
+       SET last_used_at = ?
+       WHERE credential_id = ?
+         AND (last_used_at IS NULL OR last_used_at < ?)`,
+    ).bind(now, credentialId, now - 3600).run();
+    return { ok: true, version: 2 };
+  }
+
+  if (env.EXTENSION_LEGACY_AUTH_ENABLED === "false") {
+    return { ok: false, error: "legacy_auth_disabled" };
+  }
+  const legacy = await verifyHmacWithSecret(request, bodyText, env.HMAC_SECRET || "");
+  return legacy.ok ? { ...legacy, version: 1 } : legacy;
+}
+
+async function verifyHmacWithSecret(request, bodyText, secret) {
   const sig = request.headers.get("X-Sig");
   const ts = request.headers.get("X-Ts");
   if (!sig || !ts) return { ok: false, error: "missing_hmac_headers" };
@@ -418,11 +554,18 @@ async function verifyHmac(request, bodyText, env) {
     return { ok: false, error: "expired_timestamp" };
   }
 
-  const expected = await hmacSha256Hex(env.HMAC_SECRET, bodyText + ts);
+  const expected = await hmacSha256Hex(secret, bodyText + ts);
   if (!constantTimeEqual(sig, expected)) {
     return { ok: false, error: "bad_signature" };
   }
   return { ok: true };
+}
+
+function randomBase64Url(byteLength) {
+  const bytes = crypto.getRandomValues(new Uint8Array(byteLength));
+  let binary = "";
+  for (const byte of bytes) binary += String.fromCharCode(byte);
+  return btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
 }
 
 async function hmacSha256Hex(secret, data) {
@@ -450,9 +593,9 @@ function constantTimeEqual(a, b) {
   return diff === 0;
 }
 
-function json(data, status = 200) {
+function json(data, status = 200, extraHeaders = {}) {
   return new Response(JSON.stringify(data), {
     status,
-    headers: { ...CORS_HEADERS, "Content-Type": "application/json" },
+    headers: { ...CORS_HEADERS, "Content-Type": "application/json", ...extraHeaders },
   });
 }

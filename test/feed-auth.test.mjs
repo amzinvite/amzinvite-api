@@ -10,16 +10,30 @@ const SECRET = "test-secret-123";
 const FEED_URL = "https://api.test/api/public/invitations";
 const FEED_PATH = "/api/public/invitations";
 const INSTANCE = "0123456789abcdef0123456789abcdef";
+const CREDENTIAL_ID = "11111111-1111-4111-8111-111111111111";
+const V2_SECRET = "random-install-secret-for-tests";
 
 // ─── Mock D1 : route selon le SQL ──────────────────────────────────────────
-function makeEnv({ feedRows = [{ asin: "B0TEST00001", url: "https://www.amazon.fr/dp/B0TEST00001" }], enforce = true } = {}) {
+function makeEnv({
+  feedRows = [{ asin: "B0TEST00001", url: "https://www.amazon.fr/dp/B0TEST00001" }],
+  enforce = true,
+  legacy = true,
+  credential = {
+    secret: V2_SECRET,
+    scope: "instance",
+    instance_id: INSTANCE,
+    expires_at: null,
+    revoked: 0,
+  },
+} = {}) {
   const db = {
     prepare(sql) {
       return {
-        bind() { return this; },
+        bind(...args) { this.args = args; return this; },
         async run() { return {}; },
         async first() {
           if (/SELECT count FROM rate_events/.test(sql)) return { count: 1 };
+          if (/FROM extension_credentials/.test(sql)) return credential;
           return null;
         },
         async all() {
@@ -29,7 +43,12 @@ function makeEnv({ feedRows = [{ asin: "B0TEST00001", url: "https://www.amazon.f
       };
     },
   };
-  return { DB: db, HMAC_SECRET: SECRET, FEED_AUTH_ENFORCE: enforce ? "true" : "false" };
+  return {
+    DB: db,
+    HMAC_SECRET: SECRET,
+    FEED_AUTH_ENFORCE: enforce ? "true" : "false",
+    EXTENSION_LEGACY_AUTH_ENABLED: legacy ? "true" : "false",
+  };
 }
 
 async function hmacHex(secret, data) {
@@ -46,6 +65,22 @@ function feedRequest(headers = {}) {
 async function signedHeaders({ ts = Math.floor(Date.now() / 1000).toString(), secret = SECRET, instance = INSTANCE } = {}) {
   const sig = await hmacHex(secret, FEED_PATH + ts);
   return { "X-Instance-Id": instance, "X-Ts": ts, "X-Sig": sig };
+}
+
+async function v2SignedHeaders({
+  ts = Math.floor(Date.now() / 1000).toString(),
+  secret = V2_SECRET,
+  instance = INSTANCE,
+  credentialId = CREDENTIAL_ID,
+} = {}) {
+  const sig = await hmacHex(secret, FEED_PATH + ts);
+  return {
+    "X-Instance-Id": instance,
+    "X-Auth-Version": "2",
+    "X-Credential-Id": credentialId,
+    "X-Ts": ts,
+    "X-Sig": sig,
+  };
 }
 
 // ─── Runner ────────────────────────────────────────────────────────────────
@@ -90,6 +125,38 @@ await test("accepte une requête correctement signée → 200 + données", async
   const body = await res.json();
   assert.ok(Array.isArray(body) && body.length === 1);
   assert.equal(body[0].asin, "B0TEST00001");
+});
+
+await test("accepte un credential aléatoire v2 correctement signé", async () => {
+  const headers = await v2SignedHeaders();
+  const res = await worker.fetch(feedRequest(headers), makeEnv(), {});
+  assert.equal(res.status, 200);
+});
+
+await test("refuse un credential v2 d'un autre scope", async () => {
+  const headers = await v2SignedHeaders();
+  const res = await worker.fetch(
+    feedRequest(headers),
+    makeEnv({ credential: {
+      secret: V2_SECRET,
+      scope: "observations",
+      instance_id: null,
+      expires_at: Math.floor(Date.now() / 1000) + 1000,
+      revoked: 0,
+    } }),
+    {},
+  );
+  assert.equal(res.status, 401);
+  assert.equal((await res.json()).error, "credential_scope_mismatch");
+});
+
+await test("peut désactiver le secret legacy sans bloquer v2", async () => {
+  const legacyRes = await worker.fetch(feedRequest(await signedHeaders()), makeEnv({ legacy: false }), {});
+  assert.equal(legacyRes.status, 401);
+  assert.equal((await legacyRes.json()).error, "legacy_auth_disabled");
+
+  const v2Res = await worker.fetch(feedRequest(await v2SignedHeaders()), makeEnv({ legacy: false }), {});
+  assert.equal(v2Res.status, 200);
 });
 
 await test("période de grâce (enforce=false) : requête non signée → 200", async () => {

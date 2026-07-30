@@ -1,7 +1,7 @@
 -- ─────────────────────────────────────────────────────────────────────────
 -- Schéma D1 pour le backend amzinvite
 -- ─────────────────────────────────────────────────────────────────────────
--- Trois tables, toutes anonymisées : aucune donnée perso utilisateur.
+-- Tables anonymisées : aucune donnée perso utilisateur.
 
 -- Le feed public : produits Amazon actuellement en mode invitation,
 -- alimenté par le job de synchronisation du catalogue.
@@ -29,6 +29,33 @@ CREATE TABLE IF NOT EXISTS extension_feedback (
 );
 CREATE INDEX IF NOT EXISTS idx_feedback_asin ON extension_feedback(asin, observed_at DESC);
 CREATE INDEX IF NOT EXISTS idx_feedback_instance ON extension_feedback(instance_id, received_at DESC);
+
+-- Credentials HMAC aléatoires v2. Les credentials "instance" sont liés à
+-- l'UUID anonyme ; ceux d'"observations" sont courts et non rattachés.
+CREATE TABLE IF NOT EXISTS extension_credentials (
+  credential_id TEXT PRIMARY KEY,
+  secret        TEXT NOT NULL,
+  scope         TEXT NOT NULL CHECK (scope IN ('instance', 'observations')),
+  instance_id   TEXT,
+  created_at    INTEGER NOT NULL,
+  expires_at    INTEGER,
+  last_used_at  INTEGER,
+  revoked       INTEGER NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS idx_extension_credentials_instance
+  ON extension_credentials(instance_id, scope, revoked);
+CREATE INDEX IF NOT EXISTS idx_extension_credentials_expiry
+  ON extension_credentials(expires_at, revoked);
+
+-- Dernière version d'auth vue par instance, pour décider objectivement quand
+-- le fallback legacy peut être coupé.
+CREATE TABLE IF NOT EXISTS extension_auth_activity (
+  instance_id  TEXT PRIMARY KEY,
+  auth_version INTEGER NOT NULL,
+  last_seen    INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_extension_auth_activity_rollout
+  ON extension_auth_activity(auth_version, last_seen DESC);
 
 -- Observations Amazon (partage anonyme, pas d'instance_id)
 CREATE TABLE IF NOT EXISTS observations (
