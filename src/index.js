@@ -27,6 +27,21 @@ const RATE_LIMIT_OBSERVATIONS_PER_ASIN_MINUTE = 120;
 const RATE_LIMIT_PUBLIC_FEED_PER_IP_MINUTE = 60;
 const RATE_LIMIT_REGISTRATIONS_PER_IP_HOUR = 20;
 const OBSERVATION_CREDENTIAL_TTL_SEC = 48 * 60 * 60;
+const RECENT_OBSERVATION_PRICE_MAX_AGE_SEC = 60 * 60;
+
+export function normalizeObservationPrice(value) {
+  if (value == null || value === "") return null;
+  const normalized = Number(value);
+  return Number.isFinite(normalized) && normalized > 0
+    ? Math.round(normalized * 100)
+    : null;
+}
+
+export function normalizeObservationStock(value) {
+  if (value === true || value === 1) return 1;
+  if (value === false || value === 0) return 0;
+  return null;
+}
 
 export default {
   async fetch(request, env, ctx) {
@@ -309,8 +324,8 @@ async function handleObservations(request, env) {
   ).bind(
     (it.external_id || it.asin || "").toUpperCase(),
     it.name || null,
-    it.price != null ? Math.round(Number(it.price) * 100) : null,
-    it.in_stock ? 1 : 0,
+    normalizeObservationPrice(it.price),
+    normalizeObservationStock(it.in_stock),
     it.stock_status || null,
     it.image_url || null,
     it.site || "amazon",
@@ -420,16 +435,35 @@ async function handleAdminSync(request, env) {
      LIMIT 2000`,
   ).bind(since).all();
 
-  // Observations : la plus récente par asin (une seule ligne, même si timestamps égaux)
+  // Observations : la plus récente par ASIN. Une observation de fiche sans
+  // prix ne doit pas effacer le prix listing reçu quelques instants avant :
+  // reprendre le dernier prix non nul du même ASIN, limité à une heure.
   const obsResult = await env.DB.prepare(
-    `SELECT asin, name, price_cents, in_stock, stock_status, image_url, marketplace, last_seen FROM (
+    `WITH ranked AS (
        SELECT o.asin, o.name, o.price_cents, o.in_stock, o.stock_status, o.image_url, o.marketplace,
               o.received_at as last_seen,
               ROW_NUMBER() OVER (PARTITION BY o.asin ORDER BY o.received_at DESC, o.id DESC) as rn
        FROM observations o
        WHERE o.received_at > ?
-     ) WHERE rn = 1
-     ORDER BY last_seen DESC
+     ), latest AS (
+       SELECT * FROM ranked WHERE rn = 1
+     )
+     SELECT latest.asin, latest.name,
+            COALESCE(
+              latest.price_cents,
+              (SELECT priced.price_cents
+                 FROM observations priced
+                WHERE priced.asin = latest.asin
+                  AND priced.price_cents IS NOT NULL
+                  AND priced.received_at <= latest.last_seen
+                  AND priced.received_at >= latest.last_seen - ${RECENT_OBSERVATION_PRICE_MAX_AGE_SEC}
+                ORDER BY priced.received_at DESC, priced.id DESC
+                LIMIT 1)
+            ) AS price_cents,
+            latest.in_stock, latest.stock_status, latest.image_url,
+            latest.marketplace, latest.last_seen
+       FROM latest
+      ORDER BY latest.last_seen DESC
      LIMIT 2000`,
   ).bind(since).all();
 

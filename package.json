@@ -4,7 +4,7 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "test": "node test/feed-auth.test.mjs && node test/credential-registration.test.mjs",
+    "test": "node test/feed-auth.test.mjs && node test/credential-registration.test.mjs && node test/observations.test.mjs",
     "dev": "wrangler dev",
     "deploy": "wrangler deploy",
     "db:create": "wrangler d1 create amzinvite-db",
