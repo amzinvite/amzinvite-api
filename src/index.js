@@ -434,6 +434,7 @@ async function handleAdminSync(request, env) {
 // Agrégats anonymes horaires destinés au cockpit admin PrixTCG.
 // Headers: X-Admin-Token: <ADMIN_TOKEN secret>
 // Query:   ?hours=48  (1 h à 7 jours, 48 h par défaut)
+//          &fresh=1   contourne une fois le cache admin et le remplace
 // ─────────────────────────────────────────────────────────────────────────
 async function handleAdminStats(request, env, ctx) {
   const token = request.headers.get("X-Admin-Token");
@@ -441,14 +442,18 @@ async function handleAdminStats(request, env, ctx) {
     return json({ error: "unauthorized" }, 401);
   }
 
-  const rawHours = Number.parseInt(new URL(request.url).searchParams.get("hours") || "", 10);
+  const url = new URL(request.url);
+  const rawHours = Number.parseInt(url.searchParams.get("hours") || "", 10);
+  const forceRefresh = ["1", "true"].includes(
+    url.searchParams.get("fresh")?.toLowerCase() || "",
+  );
   const hours = Number.isFinite(rawHours)
     ? Math.min(MAX_ADMIN_STATS_HOURS, Math.max(1, rawHours))
     : DEFAULT_ADMIN_STATS_HOURS;
 
   const cache = globalThis.caches?.default;
   const cacheKey = new Request(`https://stats-cache.amzinvite.internal/?hours=${hours}`);
-  const cached = cache ? await cache.match(cacheKey) : null;
+  const cached = !forceRefresh && cache ? await cache.match(cacheKey) : null;
   if (cached) {
     return json(await cached.json(), 200, {
       "Cache-Control": "private, max-age=300",
@@ -572,8 +577,8 @@ async function handleAdminStats(request, env, ctx) {
   }
 
   return json(payload, 200, {
-    "Cache-Control": "private, max-age=300",
-    "X-Amzinvite-Cache": "MISS",
+    "Cache-Control": forceRefresh ? "private, no-store" : "private, max-age=300",
+    "X-Amzinvite-Cache": forceRefresh ? "BYPASS" : "MISS",
   });
 }
 

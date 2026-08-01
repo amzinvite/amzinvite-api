@@ -55,6 +55,7 @@ function makeEnv() {
 }
 
 const originalNow = Date.now;
+const originalCaches = globalThis.caches;
 Date.now = () => NOW_MS;
 
 try {
@@ -96,7 +97,34 @@ try {
   });
   assert.equal(payload.hourly.at(-1).new_installations, 0);
 
-  console.log("admin stats: 2 passés, 0 échoué");
+  let cacheMatchCalls = 0;
+  let cachePutCalls = 0;
+  globalThis.caches = {
+    default: {
+      async match() {
+        cacheMatchCalls += 1;
+        return new Response(JSON.stringify({ generated_at: 1 }), {
+          headers: { "Content-Type": "application/json" },
+        });
+      },
+      async put() { cachePutCalls += 1; },
+    },
+  };
+  const freshResponse = await worker.fetch(
+    new Request("https://api.test/api/admin/stats?hours=48&fresh=1", {
+      headers: { "X-Admin-Token": ADMIN_TOKEN },
+    }),
+    makeEnv(),
+    {},
+  );
+  assert.equal(freshResponse.status, 200);
+  assert.equal(freshResponse.headers.get("X-Amzinvite-Cache"), "BYPASS");
+  assert.equal(freshResponse.headers.get("Cache-Control"), "private, no-store");
+  assert.equal(cacheMatchCalls, 0);
+  assert.equal(cachePutCalls, 1);
+
+  console.log("admin stats: 3 passés, 0 échoué");
 } finally {
   Date.now = originalNow;
+  globalThis.caches = originalCaches;
 }

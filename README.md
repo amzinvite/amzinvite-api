@@ -26,7 +26,7 @@ Ce service :
 | `POST` | `/api/extension/observations` | Observations anonymes envoyées par l'extension |
 | `POST` | `/api/admin/upsert` | Synchronisation du catalogue |
 | `GET` | `/api/admin/sync` | Nouvelles observations depuis le curseur local PrixTCG |
-| `GET` | `/api/admin/stats` | Statistiques horaires mises en cache 30 minutes |
+| `GET` | `/api/admin/stats` | Statistiques horaires mises en cache 30 minutes (`fresh=1` force un recalcul admin) |
 | `GET` | `/healthz` | Health check |
 
 ## Déploiement
