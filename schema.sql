@@ -29,6 +29,7 @@ CREATE TABLE IF NOT EXISTS extension_feedback (
 );
 CREATE INDEX IF NOT EXISTS idx_feedback_asin ON extension_feedback(asin, observed_at DESC);
 CREATE INDEX IF NOT EXISTS idx_feedback_instance ON extension_feedback(instance_id, received_at DESC);
+CREATE INDEX IF NOT EXISTS idx_feedback_received_at ON extension_feedback(received_at DESC);
 
 -- Credentials HMAC aléatoires v2. Les credentials "instance" sont liés à
 -- l'UUID anonyme ; ceux d'"observations" sont courts et non rattachés.
@@ -46,6 +47,8 @@ CREATE INDEX IF NOT EXISTS idx_extension_credentials_instance
   ON extension_credentials(instance_id, scope, revoked);
 CREATE INDEX IF NOT EXISTS idx_extension_credentials_expiry
   ON extension_credentials(expires_at, revoked);
+CREATE INDEX IF NOT EXISTS idx_extension_credentials_scope_created
+  ON extension_credentials(scope, created_at DESC, instance_id);
 
 -- Dernière version d'auth vue par instance, pour décider objectivement quand
 -- le fallback legacy peut être coupé.
@@ -56,6 +59,8 @@ CREATE TABLE IF NOT EXISTS extension_auth_activity (
 );
 CREATE INDEX IF NOT EXISTS idx_extension_auth_activity_rollout
   ON extension_auth_activity(auth_version, last_seen DESC);
+CREATE INDEX IF NOT EXISTS idx_extension_auth_activity_last_seen
+  ON extension_auth_activity(last_seen DESC);
 
 -- Observations Amazon (partage anonyme, pas d'instance_id)
 CREATE TABLE IF NOT EXISTS observations (
@@ -71,6 +76,7 @@ CREATE TABLE IF NOT EXISTS observations (
   received_at    INTEGER NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_observations_asin_day ON observations(asin, day_bucket);
+CREATE INDEX IF NOT EXISTS idx_observations_received_at ON observations(received_at DESC);
 
 -- Compteurs courts pour rate-limit backend-only.
 -- Les buckets sont des minutes/heures epoch selon la clé.

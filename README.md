@@ -2,6 +2,11 @@
 
 Backend public de amzinvite, basé sur Cloudflare Workers et D1.
 
+Le endpoint admin `GET /api/admin/stats?hours=48`, protégé par
+`X-Admin-Token`, expose des agrégats anonymes heure par heure sur une fenêtre
+bornée à sept jours. Il alimente le cockpit PrixTCG sans exposer les
+identifiants d'instance ni les empreintes réseau.
+
 ## Rôle
 
 Ce service :

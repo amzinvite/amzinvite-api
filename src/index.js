@@ -28,6 +28,8 @@ const RATE_LIMIT_PUBLIC_FEED_PER_IP_MINUTE = 60;
 const RATE_LIMIT_REGISTRATIONS_PER_IP_HOUR = 20;
 const OBSERVATION_CREDENTIAL_TTL_SEC = 48 * 60 * 60;
 const RECENT_OBSERVATION_PRICE_MAX_AGE_SEC = 60 * 60;
+const DEFAULT_ADMIN_STATS_HOURS = 48;
+const MAX_ADMIN_STATS_HOURS = 7 * 24;
 
 export function normalizeObservationPrice(value) {
   if (value == null || value === "") return null;
@@ -69,6 +71,9 @@ export default {
       }
       if (url.pathname === "/api/admin/sync" && request.method === "GET") {
         return await handleAdminSync(request, env);
+      }
+      if (url.pathname === "/api/admin/stats" && request.method === "GET") {
+        return await handleAdminStats(request, env);
       }
       if (url.pathname === "/" || url.pathname === "/healthz") {
         return json({ ok: true, service: "amzinvite-api" });
@@ -472,6 +477,149 @@ async function handleAdminSync(request, env) {
     observations: obsResult.results || [],
     since,
     generated_at: Math.floor(Date.now() / 1000),
+  });
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// GET /api/admin/stats
+// Agrégats anonymes horaires destinés au cockpit admin PrixTCG.
+// Headers: X-Admin-Token: <ADMIN_TOKEN secret>
+// Query:   ?hours=48  (1 h à 7 jours, 48 h par défaut)
+// ─────────────────────────────────────────────────────────────────────────
+async function handleAdminStats(request, env) {
+  const token = request.headers.get("X-Admin-Token");
+  if (!token || !constantTimeEqual(token, env.ADMIN_TOKEN || "")) {
+    return json({ error: "unauthorized" }, 401);
+  }
+
+  const rawHours = Number.parseInt(new URL(request.url).searchParams.get("hours") || "", 10);
+  const hours = Number.isFinite(rawHours)
+    ? Math.min(MAX_ADMIN_STATS_HOURS, Math.max(1, rawHours))
+    : DEFAULT_ADMIN_STATS_HOURS;
+  const now = Math.floor(Date.now() / 1000);
+  const currentHour = Math.floor(now / 3600) * 3600;
+  const startHour = currentHour - (hours - 1) * 3600;
+  const trailing24h = now - 24 * 3600;
+
+  const [summaryResult, installsResult, feedbackResult, observationsResult, feedResult] = await env.DB.batch([
+    env.DB.prepare(
+      `WITH installs AS (
+         SELECT instance_id,
+                MIN(created_at) AS first_created,
+                MAX(COALESCE(last_used_at, 0)) AS last_used
+           FROM extension_credentials
+          WHERE scope = 'instance'
+            AND instance_id IS NOT NULL
+          GROUP BY instance_id
+       )
+       SELECT
+         (SELECT COUNT(*) FROM installs) AS installations_seen,
+         (SELECT COUNT(*) FROM installs WHERE first_created >= ?1) AS new_installations_24h,
+         (SELECT COUNT(*) FROM extension_auth_activity WHERE last_seen >= ?1) AS feed_active_24h,
+         (SELECT COUNT(DISTINCT instance_id) FROM extension_feedback WHERE received_at >= ?1) AS scanning_users_24h,
+         (SELECT COUNT(DISTINCT CASE WHEN source = 'auto_request' THEN instance_id END)
+            FROM extension_feedback WHERE received_at >= ?1) AS auto_request_users_24h,
+         (SELECT COUNT(DISTINCT CASE WHEN state = 'accepted' THEN instance_id END)
+            FROM extension_feedback WHERE received_at >= ?1) AS accepted_users_24h,
+         (SELECT COUNT(*) FROM extension_feedback WHERE received_at >= ?1) AS feedback_events_24h,
+         (SELECT COUNT(*) FROM observations WHERE received_at >= ?1) AS observations_24h,
+         (SELECT COUNT(DISTINCT asin) FROM observations WHERE received_at >= ?1) AS observed_asins_24h,
+         (SELECT COALESCE(SUM(count), 0)
+            FROM rate_events
+           WHERE key LIKE 'ip:public_feed:%'
+             AND bucket >= CAST(?1 / 60 AS INTEGER)) AS feed_requests_24h`,
+    ).bind(trailing24h),
+    env.DB.prepare(
+      `WITH installs AS (
+         SELECT instance_id, MIN(created_at) AS first_created
+           FROM extension_credentials
+          WHERE scope = 'instance'
+            AND instance_id IS NOT NULL
+          GROUP BY instance_id
+       )
+       SELECT CAST(first_created / 3600 AS INTEGER) * 3600 AS hour,
+              COUNT(*) AS new_installations
+         FROM installs
+        WHERE first_created >= ?1
+        GROUP BY hour
+        ORDER BY hour`,
+    ).bind(startHour),
+    env.DB.prepare(
+      `SELECT CAST(received_at / 3600 AS INTEGER) * 3600 AS hour,
+              COUNT(DISTINCT instance_id) AS scanning_users,
+              COUNT(*) AS feedback_events,
+              COUNT(DISTINCT CASE WHEN source = 'auto_request' THEN instance_id END) AS auto_request_users,
+              COUNT(DISTINCT CASE WHEN state = 'accepted' THEN instance_id END) AS accepted_users
+         FROM extension_feedback
+        WHERE received_at >= ?1
+        GROUP BY hour
+        ORDER BY hour`,
+    ).bind(startHour),
+    env.DB.prepare(
+      `SELECT CAST(received_at / 3600 AS INTEGER) * 3600 AS hour,
+              COUNT(*) AS observations,
+              COUNT(DISTINCT asin) AS distinct_asins
+         FROM observations
+        WHERE received_at >= ?1
+        GROUP BY hour
+        ORDER BY hour`,
+    ).bind(startHour),
+    env.DB.prepare(
+      `SELECT CAST(bucket / 60 AS INTEGER) * 3600 AS hour,
+              SUM(count) AS feed_requests
+         FROM rate_events
+        WHERE key LIKE 'ip:public_feed:%'
+          AND bucket >= CAST(?1 / 60 AS INTEGER)
+        GROUP BY hour
+        ORDER BY hour`,
+    ).bind(startHour),
+  ]);
+
+  const hourly = Array.from({ length: hours }, (_, index) => ({
+    hour: startHour + index * 3600,
+    new_installations: 0,
+    scanning_users: 0,
+    feedback_events: 0,
+    auto_request_users: 0,
+    accepted_users: 0,
+    observations: 0,
+    distinct_asins: 0,
+    feed_requests: 0,
+  }));
+  const byHour = new Map(hourly.map((row) => [row.hour, row]));
+  const mergeRows = (result, fields) => {
+    for (const source of result.results || []) {
+      const target = byHour.get(Number(source.hour));
+      if (!target) continue;
+      for (const field of fields) target[field] = Number(source[field] || 0);
+    }
+  };
+  mergeRows(installsResult, ["new_installations"]);
+  mergeRows(feedbackResult, ["scanning_users", "feedback_events", "auto_request_users", "accepted_users"]);
+  mergeRows(observationsResult, ["observations", "distinct_asins"]);
+  mergeRows(feedResult, ["feed_requests"]);
+
+  const summarySource = summaryResult.results?.[0] || {};
+  const summary = Object.fromEntries([
+    "installations_seen",
+    "new_installations_24h",
+    "feed_active_24h",
+    "scanning_users_24h",
+    "auto_request_users_24h",
+    "accepted_users_24h",
+    "feedback_events_24h",
+    "observations_24h",
+    "observed_asins_24h",
+    "feed_requests_24h",
+  ].map((field) => [field, Number(summarySource[field] || 0)]));
+
+  return json({
+    generated_at: now,
+    window_hours: hours,
+    summary,
+    hourly,
+  }, 200, {
+    "Cache-Control": "private, max-age=30",
   });
 }
 
