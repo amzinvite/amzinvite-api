@@ -1,6 +1,6 @@
 name = "amzinvite-api"
 main = "src/index.js"
-compatibility_date = "2025-01-01"
+compatibility_date = "2026-08-01"
 
 # ───────────────────────────────────────────────────────────────────────
 # Bindings
@@ -13,6 +13,40 @@ binding = "DB"
 database_name = "amzinvite-db"
 database_id = "4e80bd0f-e3b5-44f9-9925-47c1ae621b08"
 migrations_dir = "migrations"
+
+# Le rate limiting natif ne génère aucune lecture/écriture D1. Les clés sont
+# isolées par usage afin qu'un type de trafic ne bloque pas les autres.
+[[ratelimits]]
+name = "REGISTRATION_RATE_LIMITER"
+namespace_id = "41001"
+
+[ratelimits.simple]
+limit = 2
+period = 60
+
+[[ratelimits]]
+name = "FEED_RATE_LIMITER"
+namespace_id = "41002"
+
+[ratelimits.simple]
+limit = 10
+period = 60
+
+[[ratelimits]]
+name = "FEEDBACK_RATE_LIMITER"
+namespace_id = "41003"
+
+[ratelimits.simple]
+limit = 10
+period = 60
+
+[[ratelimits]]
+name = "OBSERVATION_RATE_LIMITER"
+namespace_id = "41004"
+
+[ratelimits.simple]
+limit = 30
+period = 60
 
 # Secrets : configurés via `wrangler secret put <NAME>`
 # - HMAC_SECRET    : clé legacy, requise uniquement pendant la migration v2

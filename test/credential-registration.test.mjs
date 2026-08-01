@@ -12,16 +12,16 @@ const db = {
         if (/INSERT INTO extension_credentials/.test(sql)) inserted.push(this.args);
         return {};
       },
-      async first() {
-        if (/SELECT count FROM rate_events/.test(sql)) return { count: 1 };
-        return null;
-      },
+      async first() { return null; },
       async all() { return { results: [] }; },
     };
   },
 };
 
-const env = { DB: db };
+const env = {
+  DB: db,
+  REGISTRATION_RATE_LIMITER: { async limit() { return { success: true }; } },
+};
 
 async function register(payload) {
   return worker.fetch(new Request("https://api.test/api/extension/register", {

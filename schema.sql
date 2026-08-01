@@ -25,10 +25,8 @@ CREATE TABLE IF NOT EXISTS extension_feedback (
   source         TEXT,                -- bg_check | manual_visit | auto_request
   observed_at    INTEGER,
   received_at    INTEGER NOT NULL,
-  ip_hash        TEXT                 -- sha256(IP), pour rate-limit
+  ip_hash        TEXT                 -- historique, plus alimenté
 );
-CREATE INDEX IF NOT EXISTS idx_feedback_asin ON extension_feedback(asin, observed_at DESC);
-CREATE INDEX IF NOT EXISTS idx_feedback_instance ON extension_feedback(instance_id, received_at DESC);
 CREATE INDEX IF NOT EXISTS idx_feedback_received_at ON extension_feedback(received_at DESC);
 
 -- Credentials HMAC aléatoires v2. Les credentials "instance" sont liés à
@@ -75,11 +73,10 @@ CREATE TABLE IF NOT EXISTS observations (
   day_bucket     TEXT,                -- YYYY-MM-DD, pour rate-limit
   received_at    INTEGER NOT NULL
 );
-CREATE INDEX IF NOT EXISTS idx_observations_asin_day ON observations(asin, day_bucket);
 CREATE INDEX IF NOT EXISTS idx_observations_received_at ON observations(received_at DESC);
 
--- Compteurs courts pour rate-limit backend-only.
--- Les buckets sont des minutes/heures epoch selon la clé.
+-- Historique des anciens compteurs D1. Le Worker utilise désormais les
+-- bindings Rate Limiting natifs et n'écrit plus dans cette table.
 CREATE TABLE IF NOT EXISTS rate_events (
   key            TEXT NOT NULL,
   bucket         INTEGER NOT NULL,
@@ -87,4 +84,3 @@ CREATE TABLE IF NOT EXISTS rate_events (
   updated_at     INTEGER NOT NULL,
   PRIMARY KEY (key, bucket)
 );
-CREATE INDEX IF NOT EXISTS idx_rate_events_updated_at ON rate_events(updated_at);

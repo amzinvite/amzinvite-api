@@ -20,7 +20,7 @@ function makeEnv() {
       };
     },
     async batch(statements) {
-      assert.equal(statements.length, 5);
+      assert.equal(statements.length, 3);
       assert.equal(statements[0].args[0], NOW - 24 * 3600);
       assert.equal(statements[1].args[0], CURRENT_HOUR - 47 * 3600);
       return [
@@ -33,9 +33,9 @@ function makeEnv() {
             auto_request_users_24h: 121,
             accepted_users_24h: 1,
             feedback_events_24h: 15171,
-            observations_24h: 3940,
-            observed_asins_24h: 1366,
-            feed_requests_24h: 1864,
+            observations_24h: 0,
+            observed_asins_24h: 0,
+            feed_requests_24h: 0,
           }],
         },
         { results: [{ hour: CURRENT_HOUR - 3600, new_installations: 57 }] },
@@ -48,8 +48,6 @@ function makeEnv() {
             accepted_users: 1,
           }],
         },
-        { results: [{ hour: CURRENT_HOUR - 3600, observations: 981, distinct_asins: 506 }] },
-        { results: [{ hour: CURRENT_HOUR - 3600, feed_requests: 374 }] },
       ];
     },
   };
@@ -75,7 +73,8 @@ try {
     {},
   );
   assert.equal(response.status, 200);
-  assert.match(response.headers.get("Cache-Control") || "", /max-age=30/);
+  assert.match(response.headers.get("Cache-Control") || "", /max-age=300/);
+  assert.equal(response.headers.get("X-Amzinvite-Cache"), "MISS");
 
   const payload = await response.json();
   assert.equal(payload.generated_at, NOW);
@@ -91,9 +90,9 @@ try {
     feedback_events: 3367,
     auto_request_users: 72,
     accepted_users: 1,
-    observations: 981,
-    distinct_asins: 506,
-    feed_requests: 374,
+    observations: 0,
+    distinct_asins: 0,
+    feed_requests: 0,
   });
   assert.equal(payload.hourly.at(-1).new_installations, 0);
 

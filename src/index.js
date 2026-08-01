@@ -1,6 +1,6 @@
 // amzinvite-api — Cloudflare Worker
 //
-// 5 endpoints exposés :
+// Endpoints exposés :
 //   GET  /api/public/invitations       feed curé, requête signée HMAC (anti-scraping)
 //   POST /api/extension/register       délivre un credential HMAC aléatoire
 //   POST /api/extension/feedback       feedback signé HMAC, depuis l'extension
@@ -21,15 +21,10 @@ const CORS_HEADERS = {
 const HMAC_MAX_DRIFT_SEC = 300; // ±5 min
 const FEED_SIG_PAYLOAD = "/api/public/invitations"; // doit matcher l'extension
 const MAX_EXTENSION_BODY_BYTES = 128 * 1024;
-const RATE_LIMIT_FEEDBACK_PER_INSTANCE_HOUR = 500;
-const RATE_LIMIT_OBSERVATIONS_PER_IP_MINUTE = 60;
-const RATE_LIMIT_OBSERVATIONS_PER_ASIN_MINUTE = 120;
-const RATE_LIMIT_PUBLIC_FEED_PER_IP_MINUTE = 60;
-const RATE_LIMIT_REGISTRATIONS_PER_IP_HOUR = 20;
 const OBSERVATION_CREDENTIAL_TTL_SEC = 48 * 60 * 60;
-const RECENT_OBSERVATION_PRICE_MAX_AGE_SEC = 60 * 60;
 const DEFAULT_ADMIN_STATS_HOURS = 48;
 const MAX_ADMIN_STATS_HOURS = 7 * 24;
+const ADMIN_STATS_CACHE_TTL_SEC = 30 * 60;
 
 export function normalizeObservationPrice(value) {
   if (value == null || value === "") return null;
@@ -73,7 +68,7 @@ export default {
         return await handleAdminSync(request, env);
       }
       if (url.pathname === "/api/admin/stats" && request.method === "GET") {
-        return await handleAdminStats(request, env);
+        return await handleAdminStats(request, env, ctx);
       }
       if (url.pathname === "/" || url.pathname === "/healthz") {
         return json({ ok: true, service: "amzinvite-api" });
@@ -103,20 +98,16 @@ async function handleCredentialRegistration(request, env) {
   if (!["instance", "observations"].includes(scope)) {
     return json({ error: "bad_scope" }, 400);
   }
+
   const instanceId = scope === "instance" ? payload.instanceId : null;
   if (scope === "instance" && !/^[0-9a-f-]{32,40}$/i.test(instanceId || "")) {
     return json({ error: "bad_instance_id" }, 400);
   }
 
-  const ipHash = await sha256(request.headers.get("CF-Connecting-IP") || "");
-  const hourBucket = Math.floor(Date.now() / 3600000);
-  const registrationLimit = await consumeRateLimit(
-    env,
-    `ip:credential_registration:${ipHash}`,
-    hourBucket,
-    RATE_LIMIT_REGISTRATIONS_PER_IP_HOUR,
-  );
-  if (!registrationLimit.ok) {
+  const registrationLimit = await env.REGISTRATION_RATE_LIMITER.limit({
+    key: request.headers.get("CF-Connecting-IP") || "unknown",
+  });
+  if (!registrationLimit.success) {
     return json({ error: "rate_limit" }, 429);
   }
 
@@ -124,9 +115,8 @@ async function handleCredentialRegistration(request, env) {
   const secret = randomBase64Url(32);
   const now = Math.floor(Date.now() / 1000);
   const expiresAt = scope === "observations" ? now + OBSERVATION_CREDENTIAL_TTL_SEC : null;
-  // Le prochain enrôlement purge les credentials courts déjà expirés. Les
-  // clients renouvellent 6 h avant l'échéance, donc aucune clé active n'est
-  // supprimée et la table ne croît pas indéfiniment.
+  // Les clients renouvellent 6 h avant l'échéance ; la purge ne supprime donc
+  // aucun credential actif et empêche la table de croître indéfiniment.
   await env.DB.prepare(
     `DELETE FROM extension_credentials
      WHERE expires_at IS NOT NULL
@@ -150,18 +140,6 @@ async function handleCredentialRegistration(request, env) {
 // GET /api/public/invitations
 // ─────────────────────────────────────────────────────────────────────────
 async function handlePublicFeed(request, env) {
-  const ipHash = await sha256(request.headers.get("CF-Connecting-IP") || "");
-  const minuteBucket = Math.floor(Date.now() / 60000);
-  const ipLimit = await consumeRateLimit(
-    env,
-    `ip:public_feed:${ipHash}`,
-    minuteBucket,
-    RATE_LIMIT_PUBLIC_FEED_PER_IP_MINUTE,
-  );
-  if (!ipLimit.ok) {
-    return json({ error: "rate_limit" }, 429);
-  }
-
   // Le feed expose la liste curée d'ASIN/URL : on exige une requête signée
   // par l'extension (même schéma HMAC que le feedback) pour éviter qu'un
   // simple `curl` de l'URL ne récupère la liste. La signature porte sur le
@@ -174,6 +152,15 @@ async function handlePublicFeed(request, env) {
   const auth = await checkFeedAuth(request, env);
   if (!auth.ok && enforce) {
     return json({ error: auth.error }, 401);
+  }
+
+  const feedLimit = await env.FEED_RATE_LIMITER.limit({
+    key: request.headers.get("X-Instance-Id")
+      || request.headers.get("CF-Connecting-IP")
+      || "unknown",
+  });
+  if (!feedLimit.success) {
+    return json({ error: "rate_limit" }, 429);
   }
 
   const result = await env.DB.prepare(
@@ -229,16 +216,8 @@ async function handleFeedback(request, env) {
     return json({ error: "bad_state" }, 400);
   }
 
-  const ipHash = await sha256(request.headers.get("CF-Connecting-IP") || "");
-
-  const hourBucket = Math.floor(Date.now() / 3600000);
-  const instanceLimit = await consumeRateLimit(
-    env,
-    `instance:feedback:${instanceId}`,
-    hourBucket,
-    RATE_LIMIT_FEEDBACK_PER_INSTANCE_HOUR,
-  );
-  if (!instanceLimit.ok) {
+  const instanceLimit = await env.FEEDBACK_RATE_LIMITER.limit({ key: instanceId });
+  if (!instanceLimit.success) {
     return json({ error: "rate_limit" }, 429);
   }
 
@@ -252,7 +231,7 @@ async function handleFeedback(request, env) {
     payload.source || null,
     payload.observedAt || null,
     Math.floor(Date.now() / 1000),
-    ipHash,
+    null,
   ).run();
 
   return json({ ok: true });
@@ -274,6 +253,15 @@ async function handleObservations(request, env) {
     return json({ error: verified.error }, request.headers.get("X-Auth-Version") === "2" ? 401 : 400);
   }
 
+  const observationLimit = await env.OBSERVATION_RATE_LIMITER.limit({
+    key: request.headers.get("X-Credential-Id")
+      || request.headers.get("CF-Connecting-IP")
+      || "unknown",
+  });
+  if (!observationLimit.success) {
+    return json({ error: "rate_limit" }, 429);
+  }
+
   let payload;
   try { payload = JSON.parse(bodyText); }
   catch { return json({ error: "bad_json" }, 400); }
@@ -282,47 +270,18 @@ async function handleObservations(request, env) {
     return json({ error: "empty_items" }, 400);
   }
 
-  const ipHash = await sha256(request.headers.get("CF-Connecting-IP") || "");
-  const minuteBucket = Math.floor(Date.now() / 60000);
-  const ipLimit = await consumeRateLimit(
-    env,
-    `ip:observations:${ipHash}`,
-    minuteBucket,
-    RATE_LIMIT_OBSERVATIONS_PER_IP_MINUTE,
-  );
-  if (!ipLimit.ok) {
-    return json({ error: "rate_limit" }, 429);
-  }
-
   const now = Math.floor(Date.now() / 1000);
-  // Dédoublonner par ASIN — garder le dernier item de chaque ASIN
+  // Dédoublonner par ASIN — garder le dernier item de chaque ASIN.
   const seen = new Map();
   for (const it of payload.items.slice(0, 100)) {
     const asin = (it.external_id || it.asin || "").toUpperCase();
     if (/^[A-Z0-9]{10}$/i.test(asin)) seen.set(asin, it);
   }
-  const dedupedItems = Array.from(seen.values());
-  const acceptedItems = [];
-  let asinThrottled = 0;
-  for (const it of dedupedItems) {
-    const asin = (it.external_id || it.asin || "").toUpperCase();
-    const asinLimit = await consumeRateLimit(
-      env,
-      `asin:observations:${asin}`,
-      minuteBucket,
-      RATE_LIMIT_OBSERVATIONS_PER_ASIN_MINUTE,
-    );
-    if (asinLimit.ok) {
-      acceptedItems.push(it);
-    } else {
-      asinThrottled++;
-    }
-  }
+  const acceptedItems = Array.from(seen.values());
   if (acceptedItems.length === 0) {
-    return json({ ok: true, inserted: 0, deduped: payload.items.length - dedupedItems.length, throttled: asinThrottled });
+    return json({ ok: true, inserted: 0, deduped: payload.items.length });
   }
 
-  // D1 batch insert
   const stmts = acceptedItems.map((it) => env.DB.prepare(
     `INSERT INTO observations (asin, name, price_cents, in_stock, stock_status, image_url, marketplace, day_bucket, received_at)
      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
@@ -339,7 +298,11 @@ async function handleObservations(request, env) {
   ));
   await env.DB.batch(stmts);
 
-  return json({ ok: true, inserted: stmts.length, deduped: payload.items.length - dedupedItems.length, throttled: asinThrottled });
+  return json({
+    ok: true,
+    inserted: stmts.length,
+    deduped: payload.items.length - acceptedItems.length,
+  });
 }
 
 // ─────────────────────────────────────────────────────────────────────────
@@ -367,7 +330,11 @@ async function handleAdminUpsert(request, env) {
     .map((inv) => ({
       ...inv,
       asin: String(inv.asin).toUpperCase(),
-      first_seen: Number.isFinite(Number(inv.first_seen)) ? Number(inv.first_seen) : null,
+      first_seen: inv.first_seen != null
+        && inv.first_seen !== ""
+        && Number.isFinite(Number(inv.first_seen))
+        ? Number(inv.first_seen)
+        : null,
     }));
   // Upsert : si alerter fournit first_seen, il devient la source canonique.
   // Sinon on conserve le first_seen déjà stocké, avec fallback sur now.
@@ -378,8 +345,14 @@ async function handleAdminUpsert(request, env) {
        first_seen = excluded.first_seen,
        url = excluded.url,
        name = excluded.name,
+       marketplace = excluded.marketplace,
        last_updated = excluded.last_updated,
-       active = excluded.active`,
+       active = excluded.active
+     WHERE invitations.first_seen IS NOT excluded.first_seen
+        OR invitations.url IS NOT excluded.url
+        OR invitations.name IS NOT excluded.name
+        OR invitations.marketplace IS NOT excluded.marketplace
+        OR invitations.active IS NOT excluded.active`,
   ).bind(
     inv.asin,
     inv.url,
@@ -415,7 +388,7 @@ async function handleAdminUpsert(request, env) {
 
 // ─────────────────────────────────────────────────────────────────────────
 // GET /api/admin/sync
-// Expose les feedbacks et observations agrégés pour consommation par alerter.
+// Expose uniquement les nouvelles observations depuis le curseur local PrixTCG.
 // Headers: X-Admin-Token: <ADMIN_TOKEN secret>
 // Query:   ?since=<epoch_seconds>  (défaut: dernières 24h)
 // ─────────────────────────────────────────────────────────────────────────
@@ -428,52 +401,28 @@ async function handleAdminSync(request, env) {
   const sinceParam = new URL(request.url).searchParams.get("since");
   const since = sinceParam ? parseInt(sinceParam, 10) : Math.floor(Date.now() / 1000) - 86400;
 
-  // Feedback : la plus récente par asin (une seule ligne, même si timestamps égaux)
-  const feedbackResult = await env.DB.prepare(
-    `SELECT asin, last_seen FROM (
-       SELECT f.asin, f.observed_at as last_seen,
-              ROW_NUMBER() OVER (PARTITION BY f.asin ORDER BY f.observed_at DESC, f.id DESC) as rn
-       FROM extension_feedback f
-       WHERE f.received_at > ?
-     ) WHERE rn = 1
-     ORDER BY last_seen DESC
-     LIMIT 2000`,
-  ).bind(since).all();
-
-  // Observations : la plus récente par ASIN. Une observation de fiche sans
-  // prix ne doit pas effacer le prix listing reçu quelques instants avant :
-  // reprendre le dernier prix non nul du même ASIN, limité à une heure.
+  // Une seule lecture de la fenêtre incrémentale indexée. PrixTCG conserve
+  // localement le dernier prix connu lorsqu'une observation n'en contient pas,
+  // donc aucune seconde recherche corrélée par ASIN n'est nécessaire ici.
   const obsResult = await env.DB.prepare(
-    `WITH ranked AS (
-       SELECT o.asin, o.name, o.price_cents, o.in_stock, o.stock_status, o.image_url, o.marketplace,
-              o.received_at as last_seen,
-              ROW_NUMBER() OVER (PARTITION BY o.asin ORDER BY o.received_at DESC, o.id DESC) as rn
-       FROM observations o
-       WHERE o.received_at > ?
-     ), latest AS (
-       SELECT * FROM ranked WHERE rn = 1
-     )
-     SELECT latest.asin, latest.name,
-            COALESCE(
-              latest.price_cents,
-              (SELECT priced.price_cents
-                 FROM observations priced
-                WHERE priced.asin = latest.asin
-                  AND priced.price_cents IS NOT NULL
-                  AND priced.received_at <= latest.last_seen
-                  AND priced.received_at >= latest.last_seen - ${RECENT_OBSERVATION_PRICE_MAX_AGE_SEC}
-                ORDER BY priced.received_at DESC, priced.id DESC
-                LIMIT 1)
-            ) AS price_cents,
-            latest.in_stock, latest.stock_status, latest.image_url,
-            latest.marketplace, latest.last_seen
-       FROM latest
-      ORDER BY latest.last_seen DESC
-     LIMIT 2000`,
+    `SELECT asin, name, price_cents, in_stock, stock_status, image_url, marketplace,
+            received_at AS last_seen
+       FROM (
+         SELECT o.*,
+                ROW_NUMBER() OVER (
+                  PARTITION BY o.asin
+                  ORDER BY o.received_at DESC, o.id DESC
+                ) AS rn
+           FROM observations o
+          WHERE o.received_at > ?
+       )
+      WHERE rn = 1
+      ORDER BY last_seen DESC
+      LIMIT 2000`,
   ).bind(since).all();
 
   return json({
-    feedback: feedbackResult.results || [],
+    feedback: [],
     observations: obsResult.results || [],
     since,
     generated_at: Math.floor(Date.now() / 1000),
@@ -486,7 +435,7 @@ async function handleAdminSync(request, env) {
 // Headers: X-Admin-Token: <ADMIN_TOKEN secret>
 // Query:   ?hours=48  (1 h à 7 jours, 48 h par défaut)
 // ─────────────────────────────────────────────────────────────────────────
-async function handleAdminStats(request, env) {
+async function handleAdminStats(request, env, ctx) {
   const token = request.headers.get("X-Admin-Token");
   if (!token || !constantTimeEqual(token, env.ADMIN_TOKEN || "")) {
     return json({ error: "unauthorized" }, 401);
@@ -496,12 +445,23 @@ async function handleAdminStats(request, env) {
   const hours = Number.isFinite(rawHours)
     ? Math.min(MAX_ADMIN_STATS_HOURS, Math.max(1, rawHours))
     : DEFAULT_ADMIN_STATS_HOURS;
+
+  const cache = globalThis.caches?.default;
+  const cacheKey = new Request(`https://stats-cache.amzinvite.internal/?hours=${hours}`);
+  const cached = cache ? await cache.match(cacheKey) : null;
+  if (cached) {
+    return json(await cached.json(), 200, {
+      "Cache-Control": "private, max-age=300",
+      "X-Amzinvite-Cache": "HIT",
+    });
+  }
+
   const now = Math.floor(Date.now() / 1000);
   const currentHour = Math.floor(now / 3600) * 3600;
   const startHour = currentHour - (hours - 1) * 3600;
   const trailing24h = now - 24 * 3600;
 
-  const [summaryResult, installsResult, feedbackResult, observationsResult, feedResult] = await env.DB.batch([
+  const [summaryResult, installsResult, feedbackResult] = await env.DB.batch([
     env.DB.prepare(
       `WITH installs AS (
          SELECT instance_id,
@@ -511,23 +471,26 @@ async function handleAdminStats(request, env) {
           WHERE scope = 'instance'
             AND instance_id IS NOT NULL
           GROUP BY instance_id
+       ), feedback_24h AS (
+         SELECT COUNT(DISTINCT instance_id) AS scanning_users_24h,
+                COUNT(DISTINCT CASE WHEN source = 'auto_request' THEN instance_id END) AS auto_request_users_24h,
+                COUNT(DISTINCT CASE WHEN state = 'accepted' THEN instance_id END) AS accepted_users_24h,
+                COUNT(*) AS feedback_events_24h
+           FROM extension_feedback
+          WHERE received_at >= ?1
        )
        SELECT
          (SELECT COUNT(*) FROM installs) AS installations_seen,
          (SELECT COUNT(*) FROM installs WHERE first_created >= ?1) AS new_installations_24h,
          (SELECT COUNT(*) FROM extension_auth_activity WHERE last_seen >= ?1) AS feed_active_24h,
-         (SELECT COUNT(DISTINCT instance_id) FROM extension_feedback WHERE received_at >= ?1) AS scanning_users_24h,
-         (SELECT COUNT(DISTINCT CASE WHEN source = 'auto_request' THEN instance_id END)
-            FROM extension_feedback WHERE received_at >= ?1) AS auto_request_users_24h,
-         (SELECT COUNT(DISTINCT CASE WHEN state = 'accepted' THEN instance_id END)
-            FROM extension_feedback WHERE received_at >= ?1) AS accepted_users_24h,
-         (SELECT COUNT(*) FROM extension_feedback WHERE received_at >= ?1) AS feedback_events_24h,
-         (SELECT COUNT(*) FROM observations WHERE received_at >= ?1) AS observations_24h,
-         (SELECT COUNT(DISTINCT asin) FROM observations WHERE received_at >= ?1) AS observed_asins_24h,
-         (SELECT COALESCE(SUM(count), 0)
-            FROM rate_events
-           WHERE key LIKE 'ip:public_feed:%'
-             AND bucket >= CAST(?1 / 60 AS INTEGER)) AS feed_requests_24h`,
+         feedback_24h.scanning_users_24h,
+         feedback_24h.auto_request_users_24h,
+         feedback_24h.accepted_users_24h,
+         feedback_24h.feedback_events_24h,
+         0 AS observations_24h,
+         0 AS observed_asins_24h,
+         0 AS feed_requests_24h
+       FROM feedback_24h`,
     ).bind(trailing24h),
     env.DB.prepare(
       `WITH installs AS (
@@ -555,24 +518,6 @@ async function handleAdminStats(request, env) {
         GROUP BY hour
         ORDER BY hour`,
     ).bind(startHour),
-    env.DB.prepare(
-      `SELECT CAST(received_at / 3600 AS INTEGER) * 3600 AS hour,
-              COUNT(*) AS observations,
-              COUNT(DISTINCT asin) AS distinct_asins
-         FROM observations
-        WHERE received_at >= ?1
-        GROUP BY hour
-        ORDER BY hour`,
-    ).bind(startHour),
-    env.DB.prepare(
-      `SELECT CAST(bucket / 60 AS INTEGER) * 3600 AS hour,
-              SUM(count) AS feed_requests
-         FROM rate_events
-        WHERE key LIKE 'ip:public_feed:%'
-          AND bucket >= CAST(?1 / 60 AS INTEGER)
-        GROUP BY hour
-        ORDER BY hour`,
-    ).bind(startHour),
   ]);
 
   const hourly = Array.from({ length: hours }, (_, index) => ({
@@ -596,8 +541,6 @@ async function handleAdminStats(request, env) {
   };
   mergeRows(installsResult, ["new_installations"]);
   mergeRows(feedbackResult, ["scanning_users", "feedback_events", "auto_request_users", "accepted_users"]);
-  mergeRows(observationsResult, ["observations", "distinct_asins"]);
-  mergeRows(feedResult, ["feed_requests"]);
 
   const summarySource = summaryResult.results?.[0] || {};
   const summary = Object.fromEntries([
@@ -613,13 +556,24 @@ async function handleAdminStats(request, env) {
     "feed_requests_24h",
   ].map((field) => [field, Number(summarySource[field] || 0)]));
 
-  return json({
+  const payload = {
     generated_at: now,
     window_hours: hours,
     summary,
     hourly,
-  }, 200, {
-    "Cache-Control": "private, max-age=30",
+  };
+
+  if (cache) {
+    const cacheWrite = cache.put(cacheKey, json(payload, 200, {
+      "Cache-Control": `public, max-age=${ADMIN_STATS_CACHE_TTL_SEC}`,
+    }));
+    if (ctx?.waitUntil) ctx.waitUntil(cacheWrite);
+    else await cacheWrite;
+  }
+
+  return json(payload, 200, {
+    "Cache-Control": "private, max-age=300",
+    "X-Amzinvite-Cache": "MISS",
   });
 }
 
@@ -638,23 +592,6 @@ async function readLimitedText(request, maxBytes = MAX_EXTENSION_BODY_BYTES) {
     return { ok: false, error: "payload_too_large", status: 413 };
   }
   return { ok: true, text };
-}
-
-async function consumeRateLimit(env, key, bucket, limit) {
-  const now = Math.floor(Date.now() / 1000);
-  await env.DB.prepare(
-    `INSERT OR IGNORE INTO rate_events (key, bucket, count, updated_at)
-     VALUES (?, ?, 0, ?)`,
-  ).bind(key, bucket, now).run();
-  await env.DB.prepare(
-    `UPDATE rate_events
-     SET count = count + 1, updated_at = ?
-     WHERE key = ? AND bucket = ?`,
-  ).bind(now, key, bucket).run();
-  const row = await env.DB.prepare(
-    `SELECT count FROM rate_events WHERE key = ? AND bucket = ?`,
-  ).bind(key, bucket).first();
-  return { ok: (row?.count || 0) <= limit, count: row?.count || 0 };
 }
 
 async function checkFeedAuth(request, env) {
@@ -759,12 +696,6 @@ async function hmacSha256Hex(secret, data) {
   );
   const sig = await crypto.subtle.sign("HMAC", key, enc.encode(data));
   return Array.from(new Uint8Array(sig))
-    .map((b) => b.toString(16).padStart(2, "0")).join("");
-}
-
-async function sha256(s) {
-  const buf = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(s));
-  return Array.from(new Uint8Array(buf))
     .map((b) => b.toString(16).padStart(2, "0")).join("");
 }
 

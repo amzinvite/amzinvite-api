@@ -32,7 +32,6 @@ function makeEnv({
         bind(...args) { this.args = args; return this; },
         async run() { return {}; },
         async first() {
-          if (/SELECT count FROM rate_events/.test(sql)) return { count: 1 };
           if (/FROM extension_credentials/.test(sql)) return credential;
           return null;
         },
@@ -48,6 +47,7 @@ function makeEnv({
     HMAC_SECRET: SECRET,
     FEED_AUTH_ENFORCE: enforce ? "true" : "false",
     EXTENSION_LEGACY_AUTH_ENABLED: legacy ? "true" : "false",
+    FEED_RATE_LIMITER: { async limit() { return { success: true }; } },
   };
 }
 
