@@ -18,7 +18,31 @@ const CORS_HEADERS = {
 };
 
 const HMAC_MAX_DRIFT_SEC = 300; // ±5 min
-const FEED_SIG_PAYLOAD = "/api/public/invitations"; // doit matcher l'extension
+const FEED_PATH = "/api/public/invitations";
+const SUPPORTED_MARKETPLACES = new Set(["amazon.fr", "amazon.com.be"]);
+
+function normalizeMarketplace(value, fallback = null) {
+  const normalized = String(value || "").toLowerCase().replace(/^www\./, "");
+  return SUPPORTED_MARKETPLACES.has(normalized) ? normalized : fallback;
+}
+
+function marketplaceFromItem(item) {
+  const explicit = normalizeMarketplace(item?.marketplace);
+  if (explicit) return explicit;
+  try { return normalizeMarketplace(new URL(item?.url || item?.source_url).hostname); }
+  catch { return null; }
+}
+
+function invitationUrlMatchesMarketplace(rawUrl, marketplace) {
+  try {
+    const url = new URL(rawUrl);
+    const host = url.hostname.toLowerCase().replace(/^www\./, "");
+    const asin = url.pathname.match(/\/(?:dp|gp\/product)\/([A-Z0-9]{10})(?:[/?]|$)/i)?.[1];
+    return url.protocol === "https:" && host === marketplace && Boolean(asin);
+  } catch {
+    return false;
+  }
+}
 const MAX_EXTENSION_BODY_BYTES = 128 * 1024;
 const OBSERVATION_CREDENTIAL_TTL_SEC = 48 * 60 * 60;
 const DEFAULT_ADMIN_STATS_HOURS = 48;
@@ -162,13 +186,20 @@ async function handlePublicFeed(request, env) {
     return json({ error: "rate_limit" }, 429);
   }
 
+  const url = new URL(request.url);
+  const rawMarketplaces = (url.searchParams.get("marketplaces") || "amazon.fr").split(",");
+  const requested = rawMarketplaces.map((value) => normalizeMarketplace(value));
+  if (requested.some((value) => !value)) return json({ error: "bad_marketplaces" }, 400);
+  const marketplaces = [...new Set(requested)];
+  if (!marketplaces.length) return json({ error: "bad_marketplaces" }, 400);
+  const placeholders = marketplaces.map(() => "?").join(", ");
   const result = await env.DB.prepare(
-    `SELECT asin, url, name, marketplace, first_seen
+    `SELECT asin, url, name, marketplace, first_seen, is_mirror
      FROM invitations
-     WHERE active = 1
+     WHERE active = 1 AND marketplace IN (${placeholders})
      ORDER BY first_seen DESC
      LIMIT 200`,
-  ).all();
+  ).bind(...marketplaces).all();
   return new Response(JSON.stringify(result.results || []), {
     status: 200,
     headers: {
@@ -208,6 +239,10 @@ async function handleFeedback(request, env) {
   try { payload = JSON.parse(bodyText); }
   catch { return json({ error: "bad_json" }, 400); }
 
+  const marketplace = payload.marketplace == null
+    ? "amazon.fr"
+    : normalizeMarketplace(payload.marketplace);
+  if (!marketplace) return json({ error: "bad_marketplace" }, 400);
   if (!payload.asin || !/^[A-Z0-9]{10}$/i.test(payload.asin)) {
     return json({ error: "bad_asin" }, 400);
   }
@@ -221,10 +256,11 @@ async function handleFeedback(request, env) {
   }
 
   await env.DB.prepare(
-    `INSERT INTO extension_feedback (instance_id, asin, state, source, observed_at, received_at, ip_hash)
-     VALUES (?, ?, ?, ?, ?, ?, ?)`,
+    `INSERT INTO extension_feedback (instance_id, marketplace, asin, state, source, observed_at, received_at, ip_hash)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
   ).bind(
     instanceId,
+    marketplace,
     payload.asin.toUpperCase(),
     payload.state,
     payload.source || null,
@@ -270,11 +306,12 @@ async function handleObservations(request, env) {
   }
 
   const now = Math.floor(Date.now() / 1000);
-  // Dédoublonner par ASIN — garder le dernier item de chaque ASIN.
+  // Dédoublonner par marketplace + ASIN — garder le dernier item de chaque produit local.
   const seen = new Map();
   for (const it of payload.items.slice(0, 100)) {
     const asin = (it.external_id || it.asin || "").toUpperCase();
-    if (/^[A-Z0-9]{10}$/i.test(asin)) seen.set(asin, it);
+    const marketplace = marketplaceFromItem(it);
+    if (marketplace && /^[A-Z0-9]{10}$/i.test(asin)) seen.set(`${marketplace}:${asin}`, { ...it, marketplace });
   }
   const acceptedItems = Array.from(seen.values());
   if (acceptedItems.length === 0) {
@@ -291,7 +328,7 @@ async function handleObservations(request, env) {
     normalizeObservationStock(it.in_stock),
     it.stock_status || null,
     it.image_url || null,
-    it.site || "amazon",
+    it.marketplace,
     payload.dayBucket || null,
     now,
   ));
@@ -329,6 +366,7 @@ async function handleAdminUpsert(request, env) {
     .map((inv) => ({
       ...inv,
       asin: String(inv.asin).toUpperCase(),
+      marketplace: inv.marketplace == null ? "amazon.fr" : normalizeMarketplace(inv.marketplace),
       first_seen: inv.first_seen != null
         && inv.first_seen !== ""
         && Number.isFinite(Number(inv.first_seen))
@@ -337,50 +375,62 @@ async function handleAdminUpsert(request, env) {
     }));
   // Upsert : si alerter fournit first_seen, il devient la source canonique.
   // Sinon on conserve le first_seen déjà stocké, avec fallback sur now.
+  if (normalizedInvitations.some((inv) => (
+    !inv.marketplace
+    || !/^[A-Z0-9]{10}$/.test(inv.asin)
+    || !invitationUrlMatchesMarketplace(inv.url, inv.marketplace)
+  ))) {
+    return json({ error: "bad_invitation" }, 400);
+  }
+  const rawScopes = Array.isArray(payload.marketplaces) ? payload.marketplaces : null;
+  const scopes = rawScopes
+    ? rawScopes.map((value) => normalizeMarketplace(value))
+    : [...new Set(normalizedInvitations.map((inv) => inv.marketplace))];
+  if (scopes.some((marketplace) => !marketplace)) {
+    return json({ error: "bad_marketplaces" }, 400);
+  }
   const stmts = normalizedInvitations.map((inv) => env.DB.prepare(
-    `INSERT INTO invitations (asin, url, name, marketplace, first_seen, last_updated, active)
-     VALUES (?, ?, ?, ?, COALESCE(?, (SELECT first_seen FROM invitations WHERE asin = ?), ?), ?, ?)
-     ON CONFLICT(asin) DO UPDATE SET
+    `INSERT INTO invitations (asin, url, name, marketplace, first_seen, last_updated, active, is_mirror)
+     VALUES (?, ?, ?, ?, COALESCE(?, (SELECT first_seen FROM invitations WHERE marketplace = ? AND asin = ?), ?), ?, ?, ?)
+     ON CONFLICT(marketplace, asin) DO UPDATE SET
        first_seen = excluded.first_seen,
        url = excluded.url,
        name = excluded.name,
        marketplace = excluded.marketplace,
        last_updated = excluded.last_updated,
-       active = excluded.active
+       active = excluded.active,
+       is_mirror = excluded.is_mirror
      WHERE invitations.first_seen IS NOT excluded.first_seen
         OR invitations.url IS NOT excluded.url
         OR invitations.name IS NOT excluded.name
         OR invitations.marketplace IS NOT excluded.marketplace
-        OR invitations.active IS NOT excluded.active`,
+        OR invitations.active IS NOT excluded.active
+        OR invitations.is_mirror IS NOT excluded.is_mirror`,
   ).bind(
     inv.asin,
     inv.url,
     inv.name || null,
     inv.marketplace || "amazon.fr",
     inv.first_seen,
+    inv.marketplace,
     inv.asin,
     now,
     now,
     inv.active === false ? 0 : 1,
+    inv.is_mirror === true ? 1 : 0,
   ));
   if (stmts.length) {
     await env.DB.batch(stmts);
   }
 
-  const asinPlaceholders = normalizedInvitations.map(() => "?").join(", ");
-  const deactivateMissing = normalizedInvitations.length
-    ? env.DB.prepare(
-      `UPDATE invitations
-       SET active = 0, last_updated = ?
-       WHERE active = 1
-         AND asin NOT IN (${asinPlaceholders})`,
-    ).bind(now, ...normalizedInvitations.map((inv) => inv.asin))
-    : env.DB.prepare(
-      `UPDATE invitations
-       SET active = 0, last_updated = ?
-       WHERE active = 1`,
-    ).bind(now);
-  await deactivateMissing.run();
+  for (const marketplace of scopes) {
+    const asins = normalizedInvitations.filter((inv) => inv.marketplace === marketplace).map((inv) => inv.asin);
+    const placeholders = asins.map(() => "?").join(", ");
+    const statement = asins.length
+      ? env.DB.prepare(`UPDATE invitations SET active = 0, last_updated = ? WHERE marketplace = ? AND active = 1 AND asin NOT IN (${placeholders})`).bind(now, marketplace, ...asins)
+      : env.DB.prepare("UPDATE invitations SET active = 0, last_updated = ? WHERE marketplace = ? AND active = 1").bind(now, marketplace);
+    await statement.run();
+  }
 
   return json({ ok: true, upserted: stmts.length });
 }
@@ -409,7 +459,7 @@ async function handleAdminSync(request, env) {
        FROM (
          SELECT o.*,
                 ROW_NUMBER() OVER (
-                  PARTITION BY o.asin
+                  PARTITION BY o.marketplace, o.asin
                   ORDER BY o.received_at DESC, o.id DESC
                 ) AS rn
            FROM observations o
@@ -603,7 +653,9 @@ async function checkFeedAuth(request, env) {
   if (!instanceId || !/^[0-9a-f-]{32,40}$/i.test(instanceId)) {
     return { ok: false, error: "bad_instance_id" };
   }
-  const auth = await verifyExtensionHmac(request, FEED_SIG_PAYLOAD, env, {
+  const url = new URL(request.url);
+  const payload = url.search ? `${FEED_PATH}${url.search}` : FEED_PATH;
+  const auth = await verifyExtensionHmac(request, payload, env, {
     scope: "instance",
     instanceId,
   });

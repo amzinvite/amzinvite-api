@@ -25,8 +25,9 @@ const now = Math.floor(Date.now() / 1000);
 const payload = JSON.stringify({
   dayBucket: "2026-08-01",
   items: [
-    { asin: "B0TEST0001", price: 11.99, in_stock: true },
-    { asin: "B0TEST0001", price: 12.49, in_stock: false },
+    { asin: "B0TEST0001", marketplace: "amazon.fr", price: 11.99, in_stock: true },
+    { asin: "B0TEST0001", marketplace: "amazon.fr", price: 12.49, in_stock: false },
+    { asin: "B0TEST0001", marketplace: "amazon.com.be", price: 13.99, in_stock: true },
   ],
 });
 const key = await crypto.subtle.importKey(
@@ -85,8 +86,10 @@ const response = await worker.fetch(new Request("https://api.test/api/extension/
   body: payload,
 }), env, {});
 assert.equal(response.status, 200);
-assert.equal((await response.json()).inserted, 1);
-assert.equal(inserted.length, 1);
+assert.equal((await response.json()).inserted, 2);
+assert.equal(inserted.length, 2);
 assert.equal(inserted[0].args[2], 1249);
+assert.equal(inserted[0].args[6], "amazon.fr");
+assert.equal(inserted[1].args[6], "amazon.com.be");
 
-console.log("  ✓ observations : normalisation tri-state et dédoublonnage avant écriture");
+console.log("  ✓ observations : normalisation et dédoublonnage indépendant par marketplace + ASIN");

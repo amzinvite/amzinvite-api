@@ -20,7 +20,7 @@ Ce service :
 
 | Méthode | Path | Description |
 |---|---|---|
-| `GET` | `/api/public/invitations` | Feed curé (requête signée HMAC, non cachable) |
+| `GET` | `/api/public/invitations?marketplaces=amazon.fr,amazon.com.be` | Feed curé par marketplace (sans filtre : FR historique), requête signée HMAC exacte et non cachable |
 | `POST` | `/api/extension/register` | Enrôlement d'un credential HMAC aléatoire v2 |
 | `POST` | `/api/extension/feedback` | Détections anonymes envoyées par l'extension |
 | `POST` | `/api/extension/observations` | Observations anonymes envoyées par l'extension |
@@ -63,6 +63,13 @@ Les limites de débit utilisent les bindings Rate Limiting de Workers. La table
 historique `rate_events` reste présente pour compatibilité, mais n'est plus
 alimentée. Les index D1 qui ne servent pas aux lectures incrémentales sont
 retirés afin qu'un feedback ou une observation ne multiplie pas les écritures.
+
+Les produits, feedbacks et observations sont identifiés par
+`(marketplace, asin)`. Seules `amazon.fr` et `amazon.com.be` sont acceptées.
+Les anciens payloads sans marketplace restent interprétés comme France. Un
+upsert admin peut fournir `marketplaces` pour déclarer explicitement les
+snapshots remplacés : un snapshot Belgique vide ne désactive ainsi aucune ligne
+France.
 
 ## Notes
 

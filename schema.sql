@@ -6,13 +6,15 @@
 -- Le feed public : produits Amazon actuellement en mode invitation,
 -- alimenté par le job de synchronisation du catalogue.
 CREATE TABLE IF NOT EXISTS invitations (
-  asin           TEXT PRIMARY KEY,
+  asin           TEXT NOT NULL,
   url            TEXT NOT NULL,
   name           TEXT,
   marketplace    TEXT DEFAULT 'amazon.fr',
   first_seen     INTEGER NOT NULL,    -- epoch seconds
   last_updated   INTEGER NOT NULL,
-  active         INTEGER DEFAULT 1    -- 0 = sorti du mode invitation
+  active         INTEGER DEFAULT 1,   -- 0 = sorti du mode invitation
+  is_mirror      INTEGER NOT NULL DEFAULT 0,
+  PRIMARY KEY (marketplace, asin)
 );
 CREATE INDEX IF NOT EXISTS idx_invitations_active ON invitations(active, last_updated DESC);
 
@@ -20,6 +22,7 @@ CREATE INDEX IF NOT EXISTS idx_invitations_active ON invitations(active, last_up
 CREATE TABLE IF NOT EXISTS extension_feedback (
   id             INTEGER PRIMARY KEY,
   instance_id    TEXT,                -- UUID anonyme côté extension
+  marketplace    TEXT NOT NULL DEFAULT 'amazon.fr',
   asin           TEXT NOT NULL,
   state          TEXT NOT NULL,       -- available | already_requested | accepted | not_invitation
   source         TEXT,                -- bg_check | manual_visit | auto_request
