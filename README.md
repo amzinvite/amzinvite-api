@@ -13,6 +13,8 @@ exposer les identifiants d'instance ni les empreintes réseau.
 Ce service :
 
 - expose le feed public des produits Amazon actuellement en mode invitation
+- distribue un lot stable du catalogue Amazon PrixTCG à chaque installation
+  pour sa surveillance silencieuse en arrière-plan
 - reçoit les remontées anonymes de l'extension
 - reçoit les mises à jour du catalogue depuis un outil d'administration ou de synchronisation
 
@@ -21,6 +23,7 @@ Ce service :
 | Méthode | Path | Description |
 |---|---|---|
 | `GET` | `/api/public/invitations?marketplaces=amazon.fr,amazon.com.be` | Feed curé par marketplace (sans filtre : FR historique), requête signée HMAC exacte et non cachable |
+| `GET` | `/api/extension/monitoring?marketplaces=amazon.fr&limit=20` | Lot stable de produits à surveiller, signé avec le credential de l'installation et borné à 40 URLs |
 | `POST` | `/api/extension/register` | Enrôlement d'un credential HMAC aléatoire v2 |
 | `POST` | `/api/extension/feedback` | Détections anonymes envoyées par l'extension |
 | `POST` | `/api/extension/observations` | Observations anonymes envoyées par l'extension |
@@ -70,6 +73,12 @@ Les anciens payloads sans marketplace restent interprétés comme France. Un
 upsert admin peut fournir `marketplaces` pour déclarer explicitement les
 snapshots remplacés : un snapshot Belgique vide ne désactive ainsi aucune ligne
 France.
+
+Le même upsert accepte `monitoring_products` et `monitoring_marketplaces` pour
+remplacer le catalogue silencieux par marketplace. Ce catalogue est séparé des
+invitations : il n'autorise ni notification ni auto-demande dans l'extension.
+La route de monitoring choisit le lot par hachage stable du credential afin de
+répartir la couverture sans enregistrer l'identité d'une installation en D1.
 
 ## Notes
 

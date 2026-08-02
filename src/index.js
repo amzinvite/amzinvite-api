@@ -2,6 +2,7 @@
 //
 // Endpoints exposés :
 //   GET  /api/public/invitations       feed curé, requête signée HMAC (anti-scraping)
+//   GET  /api/extension/monitoring     shard de produits Amazon à observer
 //   POST /api/extension/register       délivre un credential HMAC aléatoire
 //   POST /api/extension/feedback       feedback signé HMAC, depuis l'extension
 //   POST /api/extension/observations   observations anonymes, depuis l'extension
@@ -19,6 +20,9 @@ const CORS_HEADERS = {
 
 const HMAC_MAX_DRIFT_SEC = 300; // ±5 min
 const FEED_PATH = "/api/public/invitations";
+const MONITORING_PATH = "/api/extension/monitoring";
+const DEFAULT_MONITORING_SHARD_SIZE = 20;
+const MAX_MONITORING_SHARD_SIZE = 40;
 const SUPPORTED_MARKETPLACES = new Set(["amazon.fr", "amazon.com.be"]);
 
 function normalizeMarketplace(value, fallback = null) {
@@ -74,6 +78,9 @@ export default {
     try {
       if (url.pathname === "/api/public/invitations" && request.method === "GET") {
         return await handlePublicFeed(request, env);
+      }
+      if (url.pathname === MONITORING_PATH && request.method === "GET") {
+        return await handleMonitoringFeed(request, env);
       }
       if (url.pathname === "/api/extension/register" && request.method === "POST") {
         return await handleCredentialRegistration(request, env);
@@ -208,6 +215,61 @@ async function handlePublicFeed(request, env) {
       // Réponse signée/par-instance : surtout pas de cache CDN partagé,
       // sinon Cloudflare resservirait le JSON en clair sans vérifier la
       // signature (le cache ne varie pas sur les en-têtes).
+      "Cache-Control": "no-store",
+    },
+  });
+}
+
+function monitoringAssignmentScore(instanceId, item) {
+  const value = `${instanceId}:${item.marketplace}:${item.asin}`;
+  let hash = 0x811c9dc5;
+  for (let index = 0; index < value.length; index++) {
+    hash ^= value.charCodeAt(index);
+    hash = Math.imul(hash, 0x01000193);
+  }
+  return hash >>> 0;
+}
+
+// GET /api/extension/monitoring
+// Retourne un petit shard stable par installation. Avec plusieurs centaines
+// de clients, chaque URL PrixTCG est ainsi relue par plusieurs navigateurs
+// sans faire scanner l'intégralité du catalogue à chacun.
+async function handleMonitoringFeed(request, env) {
+  const auth = await checkFeedAuth(request, env, MONITORING_PATH);
+  if (!auth.ok) return json({ error: auth.error }, 401);
+
+  const instanceId = request.headers.get("X-Instance-Id");
+  const limitResult = await env.FEED_RATE_LIMITER.limit({ key: instanceId });
+  if (!limitResult.success) return json({ error: "rate_limit" }, 429);
+
+  const url = new URL(request.url);
+  const rawMarketplaces = (url.searchParams.get("marketplaces") || "amazon.fr").split(",");
+  const requested = rawMarketplaces.map((value) => normalizeMarketplace(value));
+  if (requested.some((value) => !value)) return json({ error: "bad_marketplaces" }, 400);
+  const marketplaces = [...new Set(requested)];
+  const rawLimit = Number.parseInt(url.searchParams.get("limit") || "", 10);
+  const limit = Number.isFinite(rawLimit)
+    ? Math.min(MAX_MONITORING_SHARD_SIZE, Math.max(1, rawLimit))
+    : DEFAULT_MONITORING_SHARD_SIZE;
+  const placeholders = marketplaces.map(() => "?").join(", ");
+  const result = await env.DB.prepare(
+    `SELECT asin, url, name, marketplace
+       FROM monitoring_products
+      WHERE active = 1 AND marketplace IN (${placeholders})
+      LIMIT 2000`,
+  ).bind(...marketplaces).all();
+  const assigned = (result.results || [])
+    .map((item) => ({ ...item, monitor_only: true }))
+    .sort((left, right) => (
+      monitoringAssignmentScore(instanceId, left)
+      - monitoringAssignmentScore(instanceId, right)
+    ))
+    .slice(0, limit);
+  return new Response(JSON.stringify(assigned), {
+    status: 200,
+    headers: {
+      ...CORS_HEADERS,
+      "Content-Type": "application/json",
       "Cache-Control": "no-store",
     },
   });
@@ -373,6 +435,18 @@ async function handleAdminUpsert(request, env) {
         ? Number(inv.first_seen)
         : null,
     }));
+  const hasMonitoringSnapshot = Array.isArray(payload.monitoring_products);
+  const normalizedMonitoring = hasMonitoringSnapshot
+    ? payload.monitoring_products
+      .filter((item) => item?.asin)
+      .map((item) => ({
+        ...item,
+        asin: String(item.asin).toUpperCase(),
+        marketplace: item.marketplace == null
+          ? "amazon.fr"
+          : normalizeMarketplace(item.marketplace),
+      }))
+    : [];
   // Upsert : si alerter fournit first_seen, il devient la source canonique.
   // Sinon on conserve le first_seen déjà stocké, avec fallback sur now.
   if (normalizedInvitations.some((inv) => (
@@ -381,6 +455,22 @@ async function handleAdminUpsert(request, env) {
     || !invitationUrlMatchesMarketplace(inv.url, inv.marketplace)
   ))) {
     return json({ error: "bad_invitation" }, 400);
+  }
+  if (normalizedMonitoring.some((item) => (
+    !item.marketplace
+    || !/^[A-Z0-9]{10}$/.test(item.asin)
+    || !invitationUrlMatchesMarketplace(item.url, item.marketplace)
+  ))) {
+    return json({ error: "bad_monitoring_product" }, 400);
+  }
+  const rawMonitoringScopes = hasMonitoringSnapshot
+    ? (Array.isArray(payload.monitoring_marketplaces)
+      ? payload.monitoring_marketplaces
+      : [...new Set(normalizedMonitoring.map((item) => item.marketplace))])
+    : [];
+  const monitoringScopes = rawMonitoringScopes.map((value) => normalizeMarketplace(value));
+  if (monitoringScopes.some((marketplace) => !marketplace)) {
+    return json({ error: "bad_monitoring_marketplaces" }, 400);
   }
   const rawScopes = Array.isArray(payload.marketplaces) ? payload.marketplaces : null;
   const scopes = rawScopes
@@ -432,7 +522,46 @@ async function handleAdminUpsert(request, env) {
     await statement.run();
   }
 
-  return json({ ok: true, upserted: stmts.length });
+  const monitoringStatements = normalizedMonitoring.map((item) => env.DB.prepare(
+    `INSERT INTO monitoring_products
+       (asin, url, name, marketplace, last_updated, active)
+     VALUES (?, ?, ?, ?, ?, ?)
+     ON CONFLICT(marketplace, asin) DO UPDATE SET
+       url = excluded.url,
+       name = excluded.name,
+       last_updated = excluded.last_updated,
+       active = excluded.active
+     WHERE monitoring_products.url IS NOT excluded.url
+        OR monitoring_products.name IS NOT excluded.name
+        OR monitoring_products.active IS NOT excluded.active`,
+  ).bind(
+    item.asin,
+    item.url,
+    item.name || null,
+    item.marketplace,
+    now,
+    item.active === false ? 0 : 1,
+  ));
+  if (monitoringStatements.length) await env.DB.batch(monitoringStatements);
+
+  if (hasMonitoringSnapshot) {
+    for (const marketplace of monitoringScopes) {
+      const asins = normalizedMonitoring
+        .filter((item) => item.marketplace === marketplace)
+        .map((item) => item.asin);
+      const placeholders = asins.map(() => "?").join(", ");
+      const statement = asins.length
+        ? env.DB.prepare(`UPDATE monitoring_products SET active = 0, last_updated = ? WHERE marketplace = ? AND active = 1 AND asin NOT IN (${placeholders})`).bind(now, marketplace, ...asins)
+        : env.DB.prepare("UPDATE monitoring_products SET active = 0, last_updated = ? WHERE marketplace = ? AND active = 1").bind(now, marketplace);
+      await statement.run();
+    }
+  }
+
+  return json({
+    ok: true,
+    upserted: stmts.length,
+    monitoring_upserted: monitoringStatements.length,
+  });
 }
 
 // ─────────────────────────────────────────────────────────────────────────
@@ -648,13 +777,13 @@ async function readLimitedText(request, maxBytes = MAX_EXTENSION_BODY_BYTES) {
   return { ok: true, text };
 }
 
-async function checkFeedAuth(request, env) {
+async function checkFeedAuth(request, env, signedPath = FEED_PATH) {
   const instanceId = request.headers.get("X-Instance-Id");
   if (!instanceId || !/^[0-9a-f-]{32,40}$/i.test(instanceId)) {
     return { ok: false, error: "bad_instance_id" };
   }
   const url = new URL(request.url);
-  const payload = url.search ? `${FEED_PATH}${url.search}` : FEED_PATH;
+  const payload = url.search ? `${signedPath}${url.search}` : signedPath;
   const auth = await verifyExtensionHmac(request, payload, env, {
     scope: "instance",
     instanceId,

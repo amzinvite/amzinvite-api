@@ -55,6 +55,30 @@ assert.equal(batchStatements[0].args[3], "amazon.fr");
 assert.equal(batchStatements[1].args[3], "amazon.com.be");
 assert.equal(batchStatements[1].args[10], 1);
 
+const monitoringSnapshot = await worker.fetch(new Request("https://api.test/api/admin/upsert", {
+  method: "POST",
+  headers: {
+    "Content-Type": "application/json",
+    "X-Admin-Token": "upsert-test-token",
+  },
+  body: JSON.stringify({
+    invitations: [],
+    monitoring_products: [{
+      asin: "b0watch001",
+      marketplace: "amazon.fr",
+      url: "https://www.amazon.fr/dp/B0WATCH001",
+      name: "Produit surveillé",
+    }],
+    monitoring_marketplaces: ["amazon.fr"],
+  }),
+}), env, {});
+assert.equal(monitoringSnapshot.status, 200);
+assert.equal(batchStatements.length, 1);
+assert.match(batchStatements[0].sql, /INSERT INTO monitoring_products/);
+assert.equal(batchStatements[0].args[0], "B0WATCH001");
+assert.match(runStatements.at(-1).sql, /UPDATE monitoring_products/);
+assert.deepEqual(runStatements.at(-1).args.slice(1), ["amazon.fr", "B0WATCH001"]);
+
 const emptyBelgianSnapshot = await worker.fetch(new Request("https://api.test/api/admin/upsert", {
   method: "POST",
   headers: {
@@ -83,4 +107,4 @@ const invalidDomain = await worker.fetch(new Request("https://api.test/api/admin
 }), env, {});
 assert.equal(invalidDomain.status, 400);
 
-console.log("admin upsert : coexistence FR/BE, snapshot isolé et domaine strict");
+console.log("admin upsert : coexistence FR/BE, monitoring isolé et domaine strict");

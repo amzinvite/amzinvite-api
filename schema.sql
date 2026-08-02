@@ -18,6 +18,21 @@ CREATE TABLE IF NOT EXISTS invitations (
 );
 CREATE INDEX IF NOT EXISTS idx_invitations_active ON invitations(active, last_updated DESC);
 
+-- Catalogue Amazon PrixTCG à observer en arrière-plan. Séparé du feed
+-- invitation afin qu'un produit standard ne déclenche jamais d'auto-demande
+-- ni de notification d'invitation dans l'extension.
+CREATE TABLE IF NOT EXISTS monitoring_products (
+  asin           TEXT NOT NULL,
+  url            TEXT NOT NULL,
+  name           TEXT,
+  marketplace    TEXT NOT NULL DEFAULT 'amazon.fr',
+  last_updated   INTEGER NOT NULL,
+  active         INTEGER NOT NULL DEFAULT 1,
+  PRIMARY KEY (marketplace, asin)
+);
+CREATE INDEX IF NOT EXISTS idx_monitoring_products_active
+  ON monitoring_products(active, marketplace, asin);
+
 -- Feedback de détection d'état (opt-in côté extension, UUID anonyme)
 CREATE TABLE IF NOT EXISTS extension_feedback (
   id             INTEGER PRIMARY KEY,
