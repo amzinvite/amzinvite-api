@@ -8,7 +8,6 @@
 //   POST /api/admin/upsert             alimenté par le job d'alimentation du catalogue
 //
 // Secrets requis (wrangler secret put …) :
-//   HMAC_SECRET   : doit matcher HMAC_SECRET dans background.js de l'extension
 //   ADMIN_TOKEN   : pour le endpoint /api/admin/upsert
 
 const CORS_HEADERS = {
@@ -660,11 +659,7 @@ async function verifyExtensionHmac(request, bodyText, env, { scope, instanceId =
     return { ok: true, version: 2 };
   }
 
-  if (env.EXTENSION_LEGACY_AUTH_ENABLED === "false") {
-    return { ok: false, error: "legacy_auth_disabled" };
-  }
-  const legacy = await verifyHmacWithSecret(request, bodyText, env.HMAC_SECRET || "");
-  return legacy.ok ? { ...legacy, version: 1 } : legacy;
+  return { ok: false, error: "legacy_auth_disabled" };
 }
 
 async function verifyHmacWithSecret(request, bodyText, secret) {

@@ -1,12 +1,11 @@
 // Tests de non-régression : le feed public exige désormais une requête signée.
-// Mocke env.DB (D1) + HMAC_SECRET, importe le worker et appelle worker.fetch.
+// Mocke env.DB (D1), importe le worker et appelle worker.fetch.
 //
 // Lancer : node test/feed-auth.test.mjs
 
 import assert from "node:assert/strict";
 import worker from "../src/index.js";
 
-const SECRET = "test-secret-123";
 const FEED_URL = "https://api.test/api/public/invitations";
 const FEED_PATH = "/api/public/invitations";
 const INSTANCE = "0123456789abcdef0123456789abcdef";
@@ -44,7 +43,6 @@ function makeEnv({
   };
   return {
     DB: db,
-    HMAC_SECRET: SECRET,
     FEED_AUTH_ENFORCE: enforce ? "true" : "false",
     EXTENSION_LEGACY_AUTH_ENABLED: legacy ? "true" : "false",
     FEED_RATE_LIMITER: { async limit() { return { success: true }; } },
@@ -62,7 +60,7 @@ function feedRequest(headers = {}) {
   return new Request(FEED_URL, { method: "GET", headers });
 }
 
-async function signedHeaders({ ts = Math.floor(Date.now() / 1000).toString(), secret = SECRET, instance = INSTANCE } = {}) {
+async function signedHeaders({ ts = Math.floor(Date.now() / 1000).toString(), secret = "legacy-secret", instance = INSTANCE } = {}) {
   const sig = await hmacHex(secret, FEED_PATH + ts);
   return { "X-Instance-Id": instance, "X-Ts": ts, "X-Sig": sig };
 }
@@ -104,7 +102,7 @@ await test("refuse un instanceId mal formé → 401", async () => {
 });
 
 await test("refuse une signature invalide → 401", async () => {
-  const headers = await signedHeaders({ secret: "mauvais-secret" });
+  const headers = await v2SignedHeaders({ secret: "mauvais-secret" });
   const res = await worker.fetch(feedRequest(headers), makeEnv(), {});
   assert.equal(res.status, 401);
   assert.equal((await res.json()).error, "bad_signature");
@@ -112,14 +110,14 @@ await test("refuse une signature invalide → 401", async () => {
 
 await test("refuse un timestamp expiré → 401", async () => {
   const oldTs = (Math.floor(Date.now() / 1000) - 10000).toString();
-  const headers = await signedHeaders({ ts: oldTs });
+  const headers = await v2SignedHeaders({ ts: oldTs });
   const res = await worker.fetch(feedRequest(headers), makeEnv(), {});
   assert.equal(res.status, 401);
   assert.equal((await res.json()).error, "expired_timestamp");
 });
 
-await test("accepte une requête correctement signée → 200 + données", async () => {
-  const headers = await signedHeaders();
+await test("accepte une requête v2 correctement signée → 200 + données", async () => {
+  const headers = await v2SignedHeaders();
   const res = await worker.fetch(feedRequest(headers), makeEnv(), {});
   assert.equal(res.status, 200);
   const body = await res.json();
@@ -150,8 +148,8 @@ await test("refuse un credential v2 d'un autre scope", async () => {
   assert.equal((await res.json()).error, "credential_scope_mismatch");
 });
 
-await test("peut désactiver le secret legacy sans bloquer v2", async () => {
-  const legacyRes = await worker.fetch(feedRequest(await signedHeaders()), makeEnv({ legacy: false }), {});
+await test("refuse toujours le secret legacy sans bloquer v2", async () => {
+  const legacyRes = await worker.fetch(feedRequest(await signedHeaders()), makeEnv({ legacy: true }), {});
   assert.equal(legacyRes.status, 401);
   assert.equal((await legacyRes.json()).error, "legacy_auth_disabled");
 
@@ -167,7 +165,7 @@ await test("période de grâce (enforce=false) : requête non signée → 200", 
 });
 
 await test("réponse signée → pas de cache CDN partagé (no-store)", async () => {
-  const headers = await signedHeaders();
+  const headers = await v2SignedHeaders();
   const res = await worker.fetch(feedRequest(headers), makeEnv(), {});
   assert.match(res.headers.get("Cache-Control") || "", /no-store/);
 });

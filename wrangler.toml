@@ -49,21 +49,15 @@ limit = 30
 period = 60
 
 # Secrets : configurés via `wrangler secret put <NAME>`
-# - HMAC_SECRET    : clé legacy, requise uniquement pendant la migration v2
 # - ADMIN_TOKEN    : pour les endpoints d'upsert du catalogue
 #
 # Pas besoin de les déclarer ici, mais on les liste pour mémoire.
 
-# Période de grâce pour la signature du feed public :
-#   "false" (défaut) → accepte les requêtes signées ET non signées, le temps
-#                       que le Chrome Web Store pousse l'extension ≥0.1.14.
-#   "true"           → strict, les requêtes non signées sont rejetées (401).
-# Passer à "true" puis redéployer une fois l'extension signée largement adoptée.
+# Authentification stricte du feed public : les requêtes non signées et les
+# signatures legacy sont rejetées.
 [vars]
-FEED_AUTH_ENFORCE = "false"
-# Laisser à "true" pendant l'adoption de l'extension v2, puis passer à
-# "false" pour supprimer définitivement le secret partagé historique.
-EXTENSION_LEGACY_AUTH_ENABLED = "true"
+FEED_AUTH_ENFORCE = "true"
+EXTENSION_LEGACY_AUTH_ENABLED = "false"
 
 [observability]
 enabled = true

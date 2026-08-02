@@ -39,18 +39,17 @@ Ce service :
 
 ## Secrets
 
-- `HMAC_SECRET` (legacy uniquement pendant la migration)
 - `ADMIN_TOKEN`
 
-## Migration de l'authentification extension
+## Authentification extension
 
-1. Exécuter `npm run db:migrate:auth-v2`.
-2. Déployer le Worker avec `EXTENSION_LEGACY_AUTH_ENABLED = "true"`.
-3. Publier l'extension v2 : elle enrôle une clé aléatoire par installation.
-4. Contrôler l'adoption via `extension_auth_activity` :
-   `SELECT auth_version, COUNT(*) FROM extension_auth_activity WHERE last_seen > unixepoch() - 604800 GROUP BY auth_version`.
-5. Passer `EXTENSION_LEGACY_AUTH_ENABLED` à `"false"` et redéployer.
-6. Retirer `HMAC_SECRET` du Worker et le fallback legacy de l'extension.
+L'extension utilise l'authentification v2 : chaque installation enrôle un
+credential HMAC aléatoire via `/api/extension/register`, stocké localement dans
+Chrome. Le feed public exige une requête signée v2 et les anciennes signatures
+legacy sont refusées.
+
+Contrôler l'adoption via `extension_auth_activity` :
+`SELECT auth_version, COUNT(*) FROM extension_auth_activity WHERE last_seen > unixepoch() - 604800 GROUP BY auth_version`.
 
 Les observations utilisent un credential distinct, sans `instance_id`, qui
 expire après 48 heures. Elles ne sont donc pas rattachées durablement à une

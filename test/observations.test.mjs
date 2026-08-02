@@ -19,7 +19,8 @@ assert.equal(normalizeObservationStock(0), 0);
 assert.equal(normalizeObservationStock(null), null);
 assert.equal(normalizeObservationStock(undefined), null);
 
-const SECRET = "observation-secret";
+const SECRET = "observation-v2-secret";
+const CREDENTIAL_ID = "22222222-2222-4222-8222-222222222222";
 const now = Math.floor(Date.now() / 1000);
 const payload = JSON.stringify({
   dayBucket: "2026-08-01",
@@ -46,14 +47,25 @@ const signatureHex = Array.from(new Uint8Array(signature))
 
 let inserted = [];
 const env = {
-  HMAC_SECRET: SECRET,
-  EXTENSION_LEGACY_AUTH_ENABLED: "true",
+  EXTENSION_LEGACY_AUTH_ENABLED: "false",
   OBSERVATION_RATE_LIMITER: { async limit() { return { success: true }; } },
   DB: {
     prepare(sql) {
       return {
         bind(...args) { this.args = args; return this; },
-        async first() { return null; },
+        async first() {
+          if (/FROM extension_credentials/.test(sql)) {
+            return {
+              secret: SECRET,
+              scope: "observations",
+              instance_id: null,
+              expires_at: now + 1000,
+              revoked: 0,
+            };
+          }
+          return null;
+        },
+        async run() { return {}; },
       };
     },
     async batch(statements) {
@@ -64,7 +76,12 @@ const env = {
 };
 const response = await worker.fetch(new Request("https://api.test/api/extension/observations", {
   method: "POST",
-  headers: { "X-Ts": String(now), "X-Sig": signatureHex },
+  headers: {
+    "X-Auth-Version": "2",
+    "X-Credential-Id": CREDENTIAL_ID,
+    "X-Ts": String(now),
+    "X-Sig": signatureHex,
+  },
   body: payload,
 }), env, {});
 assert.equal(response.status, 200);
