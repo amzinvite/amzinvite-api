@@ -77,7 +77,34 @@ assert.equal(batchStatements.length, 1);
 assert.match(batchStatements[0].sql, /INSERT INTO monitoring_products/);
 assert.equal(batchStatements[0].args[0], "B0WATCH001");
 assert.match(runStatements.at(-1).sql, /UPDATE monitoring_products/);
-assert.deepEqual(runStatements.at(-1).args.slice(1), ["amazon.fr", "B0WATCH001"]);
+assert.deepEqual(runStatements.at(-1).args.slice(1, 2), ["amazon.fr"]);
+assert.deepEqual(JSON.parse(runStatements.at(-1).args[2]), ["B0WATCH001"]);
+
+const largeMonitoringSnapshot = Array.from({ length: 1_501 }, (_, index) => {
+  const asin = `B${String(index).padStart(9, "0")}`;
+  return {
+    asin,
+    marketplace: "amazon.fr",
+    url: `https://www.amazon.fr/dp/${asin}`,
+    name: `Produit ${index}`,
+  };
+});
+const largeResponse = await worker.fetch(new Request("https://api.test/api/admin/upsert", {
+  method: "POST",
+  headers: {
+    "Content-Type": "application/json",
+    "X-Admin-Token": "upsert-test-token",
+  },
+  body: JSON.stringify({
+    invitations: [],
+    monitoring_products: largeMonitoringSnapshot,
+    monitoring_marketplaces: ["amazon.fr"],
+  }),
+}), env, {});
+assert.equal(largeResponse.status, 200);
+assert.equal(runStatements.at(-1).args.length, 3);
+assert.match(runStatements.at(-1).sql, /json_each\(\?\)/);
+assert.equal(JSON.parse(runStatements.at(-1).args[2]).length, 1_501);
 
 const emptyBelgianSnapshot = await worker.fetch(new Request("https://api.test/api/admin/upsert", {
   method: "POST",

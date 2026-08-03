@@ -515,9 +515,8 @@ async function handleAdminUpsert(request, env) {
 
   for (const marketplace of scopes) {
     const asins = normalizedInvitations.filter((inv) => inv.marketplace === marketplace).map((inv) => inv.asin);
-    const placeholders = asins.map(() => "?").join(", ");
     const statement = asins.length
-      ? env.DB.prepare(`UPDATE invitations SET active = 0, last_updated = ? WHERE marketplace = ? AND active = 1 AND asin NOT IN (${placeholders})`).bind(now, marketplace, ...asins)
+      ? env.DB.prepare(`UPDATE invitations SET active = 0, last_updated = ? WHERE marketplace = ? AND active = 1 AND asin NOT IN (SELECT CAST(value AS TEXT) FROM json_each(?))`).bind(now, marketplace, JSON.stringify(asins))
       : env.DB.prepare("UPDATE invitations SET active = 0, last_updated = ? WHERE marketplace = ? AND active = 1").bind(now, marketplace);
     await statement.run();
   }
@@ -549,9 +548,8 @@ async function handleAdminUpsert(request, env) {
       const asins = normalizedMonitoring
         .filter((item) => item.marketplace === marketplace)
         .map((item) => item.asin);
-      const placeholders = asins.map(() => "?").join(", ");
       const statement = asins.length
-        ? env.DB.prepare(`UPDATE monitoring_products SET active = 0, last_updated = ? WHERE marketplace = ? AND active = 1 AND asin NOT IN (${placeholders})`).bind(now, marketplace, ...asins)
+        ? env.DB.prepare(`UPDATE monitoring_products SET active = 0, last_updated = ? WHERE marketplace = ? AND active = 1 AND asin NOT IN (SELECT CAST(value AS TEXT) FROM json_each(?))`).bind(now, marketplace, JSON.stringify(asins))
         : env.DB.prepare("UPDATE monitoring_products SET active = 0, last_updated = ? WHERE marketplace = ? AND active = 1").bind(now, marketplace);
       await statement.run();
     }
