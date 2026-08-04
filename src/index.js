@@ -56,11 +56,6 @@ const ADMIN_STATS_CACHE_TTL_SEC = 30 * 60;
 const RAW_FEEDBACK_STATES = new Set(["available", "accepted"]);
 const DEFAULT_RETENTION_DAYS = 14;
 const PUBLIC_WAVES_CACHE_TTL_SEC = 60 * 60;
-const PARIS_TIME_ZONE = "Europe/Paris";
-const CANONICAL_WAVE_SLOTS = Object.freeze([
-  { weekday: 1, hour: 22, minute: 0 },
-  { weekday: 5, hour: 11, minute: 30 },
-]);
 
 export function normalizeObservationPrice(value) {
   if (value == null || value === "") return null;
@@ -74,54 +69,6 @@ export function normalizeObservationStock(value) {
   if (value === true || value === 1) return 1;
   if (value === false || value === 0) return 0;
   return null;
-}
-
-function parisParts(date) {
-  const parts = new Intl.DateTimeFormat("fr-FR", {
-    timeZone: PARIS_TIME_ZONE,
-    year: "numeric", month: "2-digit", day: "2-digit",
-    hour: "2-digit", minute: "2-digit", second: "2-digit",
-    hourCycle: "h23",
-  }).formatToParts(date);
-  return Object.fromEntries(parts
-    .filter((part) => part.type !== "literal")
-    .map((part) => [part.type, Number(part.value)]));
-}
-
-function parisDateTimeToEpoch(year, month, day, hour, minute) {
-  const wallClockUtc = Date.UTC(year, month - 1, day, hour, minute);
-  const initialParts = parisParts(new Date(wallClockUtc));
-  const initialOffset = Date.UTC(
-    initialParts.year, initialParts.month - 1, initialParts.day,
-    initialParts.hour, initialParts.minute, initialParts.second,
-  ) - wallClockUtc;
-  const candidate = wallClockUtc - initialOffset;
-  const corrected = parisParts(new Date(candidate));
-  const correctedOffset = Date.UTC(
-    corrected.year, corrected.month - 1, corrected.day,
-    corrected.hour, corrected.minute, corrected.second,
-  ) - candidate;
-  return wallClockUtc - correctedOffset;
-}
-
-export function canonicalWaveStart(epochSeconds) {
-  const observed = new Date(Number(epochSeconds) * 1000);
-  const current = parisParts(observed);
-  const parisDayUtc = Date.UTC(current.year, current.month - 1, current.day);
-  const candidates = [];
-  for (let dayOffset = -7; dayOffset <= 7; dayOffset++) {
-    const day = new Date(parisDayUtc + dayOffset * 86400000);
-    for (const slot of CANONICAL_WAVE_SLOTS) {
-      if (day.getUTCDay() !== slot.weekday) continue;
-      candidates.push(parisDateTimeToEpoch(
-        day.getUTCFullYear(), day.getUTCMonth() + 1, day.getUTCDate(),
-        slot.hour, slot.minute,
-      ));
-    }
-  }
-  return Math.round(candidates.sort(
-    (a, b) => Math.abs(a - observed.getTime()) - Math.abs(b - observed.getTime()) || a - b,
-  )[0] / 1000);
 }
 
 export default {
@@ -183,7 +130,7 @@ export default {
 // ─────────────────────────────────────────────────────────────────────────
 async function handlePublicWaves(env, ctx) {
   const cache = globalThis.caches?.default;
-  const cacheKey = new Request("https://waves-cache.amzinvite.internal/v5");
+  const cacheKey = new Request("https://waves-cache.amzinvite.internal/v6");
   const cached = cache ? await cache.match(cacheKey) : null;
   if (cached) {
     return json(await cached.json(), 200, {
@@ -302,13 +249,12 @@ async function handlePublicWaves(env, ctx) {
     const id = String(row.started_at);
     let wave = wavesById.get(id);
     if (!wave) {
-      const canonicalStart = canonicalWaveStart(Number(row.started_at));
       const activeUsers = Number(row.active_users || 0);
       const selectedUsers = Number(row.selected_users || 0);
       wave = {
         id,
-        started_at: canonicalStart,
-        ended_at: canonicalStart + 86400,
+        started_at: Number(row.started_at),
+        ended_at: Number(row.ended_at),
         finalized: Number(row.ended_at) <= now,
         installations: Number(row.installations || 0),
         active_users: activeUsers,
@@ -351,11 +297,10 @@ async function handlePublicWaves(env, ctx) {
     if (wavesById.has(id)) continue;
     let wave = archivedById.get(id);
     if (!wave) {
-      const canonicalStart = canonicalWaveStart(Number(row.started_at));
       wave = {
         id,
-        started_at: canonicalStart,
-        ended_at: canonicalStart + 86400,
+        started_at: Number(row.started_at),
+        ended_at: Number(row.ended_at),
         finalized: true,
         installations: Number(row.installations || 0),
         active_users: Number(row.active_users || 0),

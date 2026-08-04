@@ -10,7 +10,7 @@ compatibility_date = "2026-08-01"
 # l'ID retourné ci-dessous.
 [[d1_databases]]
 binding = "DB"
-database_name = "amzinvite-db"
+database_name = "mzinvite-db"
 database_id = "4e80bd0f-e3b5-44f9-9925-47c1ae621b08"
 migrations_dir = "migrations"
 

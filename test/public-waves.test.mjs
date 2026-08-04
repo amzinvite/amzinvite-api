@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import worker, { canonicalWaveStart } from "../src/index.js";
+import worker from "../src/index.js";
 
 const originalCaches = globalThis.caches;
 
@@ -58,14 +58,6 @@ function makeEnv() {
 }
 
 try {
-  assert.equal(
-    canonicalWaveStart(Date.parse("2026-08-03T18:09:16Z") / 1000),
-    Date.parse("2026-08-03T20:00:00Z") / 1000,
-  );
-  assert.equal(
-    canonicalWaveStart(Date.parse("2026-07-17T10:04:13Z") / 1000),
-    Date.parse("2026-07-17T09:30:00Z") / 1000,
-  );
   globalThis.caches = undefined;
   const response = await worker.fetch(new Request("https://api.test/api/public/waves"), makeEnv(), {});
   assert.equal(response.status, 200);
