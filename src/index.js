@@ -131,7 +131,7 @@ export default {
 // ─────────────────────────────────────────────────────────────────────────
 async function handlePublicWaves(env, ctx) {
   const cache = globalThis.caches?.default;
-  const cacheKey = new Request("https://waves-cache.amzinvite.internal/v1");
+  const cacheKey = new Request("https://waves-cache.amzinvite.internal/v2");
   const cached = cache ? await cache.match(cacheKey) : null;
   if (cached) {
     return json(await cached.json(), 200, {
@@ -215,19 +215,33 @@ async function handlePublicWaves(env, ctx) {
           AND f.first_received_at < b.ended_at
           AND f.state IN ('already_requested', 'accepted')
         GROUP BY b.wave_id, f.marketplace, f.asin
+     ), latest_product_images AS (
+       SELECT marketplace, asin, image_url
+         FROM (
+           SELECT marketplace, asin, image_url,
+                  ROW_NUMBER() OVER (
+                    PARTITION BY marketplace, asin ORDER BY last_received_at DESC
+                  ) AS rn
+             FROM observations_hourly
+            WHERE hour >= ?1 AND image_url IS NOT NULL AND image_url <> ''
+         )
+        WHERE rn = 1
      )
      SELECT s.wave_id, s.started_at, s.ended_at, s.selected_users,
             s.validations, s.products, a.active_users, n.installations,
             p.marketplace, p.asin, p.name,
             p.selected_users AS product_selected_users,
             p.validations AS product_validations,
-            COALESCE(e.eligible_users, p.selected_users) AS eligible_users
+            COALESCE(e.eligible_users, p.selected_users) AS eligible_users,
+            x.image_url
        FROM wave_summary s
        JOIN wave_activity a ON a.wave_id = s.wave_id
        JOIN wave_installs n ON n.wave_id = s.wave_id
        JOIN product_summary p ON p.wave_id = s.wave_id
        LEFT JOIN eligible_summary e
          ON e.wave_id = p.wave_id AND e.marketplace = p.marketplace AND e.asin = p.asin
+       LEFT JOIN latest_product_images x
+         ON x.marketplace = p.marketplace AND x.asin = p.asin
       ORDER BY s.started_at DESC, product_selected_users DESC, p.name`,
   ).bind(cutoff).all();
 
@@ -259,6 +273,7 @@ async function handlePublicWaves(env, ctx) {
       marketplace: row.marketplace,
       asin: row.asin,
       name: row.name,
+      image_url: safePublicAmazonImage(row.image_url),
       selected_users: productSelectedUsers,
       validations: Number(row.product_validations || 0),
       eligible_users: eligibleUsers,
@@ -282,6 +297,19 @@ async function handlePublicWaves(env, ctx) {
     else await write;
   }
   return json(payload, 200, responseHeaders);
+}
+
+function safePublicAmazonImage(value) {
+  if (!value) return null;
+  try {
+    const url = new URL(String(value));
+    const host = url.hostname.toLowerCase();
+    if (url.protocol !== "https:") return null;
+    if (host !== "m.media-amazon.com" && !host.endsWith(".ssl-images-amazon.com")) return null;
+    return url.toString();
+  } catch {
+    return null;
+  }
 }
 
 // ─────────────────────────────────────────────────────────────────────────
