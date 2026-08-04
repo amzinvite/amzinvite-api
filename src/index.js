@@ -2,6 +2,7 @@
 //
 // Endpoints exposés :
 //   GET  /api/public/invitations       feed curé, requête signée HMAC (anti-scraping)
+//   GET  /api/public/waves             statistiques anonymes agrégées des vagues
 //   GET  /api/extension/monitoring     shard de produits Amazon à observer
 //   POST /api/extension/register       délivre un credential HMAC aléatoire
 //   POST /api/extension/feedback       feedback signé HMAC, depuis l'extension
@@ -54,6 +55,7 @@ const MAX_ADMIN_STATS_HOURS = 7 * 24;
 const ADMIN_STATS_CACHE_TTL_SEC = 30 * 60;
 const RAW_FEEDBACK_STATES = new Set(["available", "accepted"]);
 const DEFAULT_RETENTION_DAYS = 14;
+const PUBLIC_WAVES_CACHE_TTL_SEC = 60 * 60;
 
 export function normalizeObservationPrice(value) {
   if (value == null || value === "") return null;
@@ -80,6 +82,9 @@ export default {
     try {
       if (url.pathname === "/api/public/invitations" && request.method === "GET") {
         return await handlePublicFeed(request, env);
+      }
+      if (url.pathname === "/api/public/waves" && request.method === "GET") {
+        return await handlePublicWaves(env, ctx);
       }
       if (url.pathname === MONITORING_PATH && request.method === "GET") {
         return await handleMonitoringFeed(request, env);
@@ -116,6 +121,168 @@ export default {
     ctx.waitUntil(purgeExpiredData(env));
   },
 };
+
+// ─────────────────────────────────────────────────────────────────────────
+// GET /api/public/waves
+// Statistiques strictement agrégées : aucun instance_id ne quitte D1.
+// Une vague commence après au moins 36 h sans nouvelle sélection détectée et
+// couvre les 24 h suivantes. Toute la fenêtre est renvoyée en une réponse pour
+// que le sélecteur côté PrixTCG ne déclenche aucun nouvel appel réseau.
+// ─────────────────────────────────────────────────────────────────────────
+async function handlePublicWaves(env, ctx) {
+  const cache = globalThis.caches?.default;
+  const cacheKey = new Request("https://waves-cache.amzinvite.internal/v1");
+  const cached = cache ? await cache.match(cacheKey) : null;
+  if (cached) {
+    return json(await cached.json(), 200, {
+      "Cache-Control": `public, max-age=300, s-maxage=${PUBLIC_WAVES_CACHE_TTL_SEC}, stale-while-revalidate=86400`,
+      "X-Amzinvite-Cache": "HIT",
+    });
+  }
+
+  const now = Math.floor(Date.now() / 1000);
+  const retentionDays = Math.max(7, Math.min(90, Number.parseInt(env.DATA_RETENTION_DAYS || "14", 10) || 14));
+  const cutoff = now - retentionDays * 86400;
+  const result = await env.DB.prepare(
+    `WITH accepted_hours AS (
+       SELECT instance_id, marketplace, asin, hour,
+              COALESCE(first_observed_at, first_received_at) AS observed_at,
+              LAG(hour) OVER (
+                PARTITION BY instance_id, marketplace, asin ORDER BY hour
+              ) AS previous_hour
+         FROM feedback_hourly
+        WHERE state = 'accepted' AND hour >= ?1
+     ), accepted_runs AS (
+       SELECT *,
+              SUM(CASE WHEN previous_hour IS NULL OR hour - previous_hour >= 129600 THEN 1 ELSE 0 END)
+                OVER (PARTITION BY instance_id, marketplace, asin ORDER BY hour) AS run_id
+         FROM accepted_hours
+     ), acceptance_events AS (
+       SELECT instance_id, marketplace, asin, run_id, MIN(observed_at) AS accepted_at
+         FROM accepted_runs
+        GROUP BY instance_id, marketplace, asin, run_id
+     ), ordered_events AS (
+       SELECT *, LAG(accepted_at) OVER (ORDER BY accepted_at) AS previous_event
+         FROM acceptance_events
+     ), wave_events AS (
+       SELECT *,
+              SUM(CASE WHEN previous_event IS NULL OR accepted_at - previous_event >= 129600 THEN 1 ELSE 0 END)
+                OVER (ORDER BY accepted_at) AS wave_id
+         FROM ordered_events
+     ), wave_bounds AS (
+       SELECT wave_id, MIN(accepted_at) AS started_at, MIN(accepted_at) + 86400 AS ended_at
+         FROM wave_events
+        GROUP BY wave_id
+       HAVING COUNT(DISTINCT instance_id) >= 2
+     ), wave_summary AS (
+       SELECT b.wave_id, b.started_at, b.ended_at,
+              COUNT(DISTINCT e.instance_id) AS selected_users,
+              COUNT(*) AS validations,
+              COUNT(DISTINCT e.asin) AS products
+         FROM wave_bounds b
+         JOIN wave_events e ON e.wave_id = b.wave_id AND e.accepted_at < b.ended_at
+        GROUP BY b.wave_id, b.started_at, b.ended_at
+     ), wave_activity AS (
+       SELECT b.wave_id,
+              COUNT(DISTINCT f.instance_id) AS active_users
+         FROM wave_bounds b
+         LEFT JOIN feedback_hourly f
+           ON f.last_received_at >= b.started_at AND f.first_received_at < b.ended_at
+        GROUP BY b.wave_id
+     ), wave_installs AS (
+       SELECT b.wave_id,
+              COUNT(DISTINCT c.instance_id) AS installations
+         FROM wave_bounds b
+         LEFT JOIN extension_credentials c
+           ON c.scope = 'instance' AND c.instance_id IS NOT NULL AND c.created_at < b.ended_at
+        GROUP BY b.wave_id
+     ), product_summary AS (
+       SELECT b.wave_id, e.marketplace, e.asin,
+              COALESCE(i.name, m.name, e.asin) AS name,
+              COUNT(DISTINCT e.instance_id) AS selected_users,
+              COUNT(*) AS validations
+         FROM wave_bounds b
+         JOIN wave_events e ON e.wave_id = b.wave_id AND e.accepted_at < b.ended_at
+         LEFT JOIN invitations i ON i.marketplace = e.marketplace AND i.asin = e.asin
+         LEFT JOIN monitoring_products m ON m.marketplace = e.marketplace AND m.asin = e.asin
+        GROUP BY b.wave_id, e.marketplace, e.asin, COALESCE(i.name, m.name, e.asin)
+     ), eligible_summary AS (
+       SELECT b.wave_id, f.marketplace, f.asin,
+              COUNT(DISTINCT f.instance_id) AS eligible_users
+         FROM wave_bounds b
+         JOIN feedback_hourly f
+           ON f.last_received_at >= b.started_at - 86400
+          AND f.first_received_at < b.ended_at
+          AND f.state IN ('already_requested', 'accepted')
+        GROUP BY b.wave_id, f.marketplace, f.asin
+     )
+     SELECT s.wave_id, s.started_at, s.ended_at, s.selected_users,
+            s.validations, s.products, a.active_users, n.installations,
+            p.marketplace, p.asin, p.name,
+            p.selected_users AS product_selected_users,
+            p.validations AS product_validations,
+            COALESCE(e.eligible_users, p.selected_users) AS eligible_users
+       FROM wave_summary s
+       JOIN wave_activity a ON a.wave_id = s.wave_id
+       JOIN wave_installs n ON n.wave_id = s.wave_id
+       JOIN product_summary p ON p.wave_id = s.wave_id
+       LEFT JOIN eligible_summary e
+         ON e.wave_id = p.wave_id AND e.marketplace = p.marketplace AND e.asin = p.asin
+      ORDER BY s.started_at DESC, product_selected_users DESC, p.name`,
+  ).bind(cutoff).all();
+
+  const wavesById = new Map();
+  for (const row of result.results || []) {
+    const id = String(row.started_at);
+    let wave = wavesById.get(id);
+    if (!wave) {
+      const activeUsers = Number(row.active_users || 0);
+      const selectedUsers = Number(row.selected_users || 0);
+      wave = {
+        id,
+        started_at: Number(row.started_at),
+        ended_at: Number(row.ended_at),
+        finalized: Number(row.ended_at) <= now,
+        installations: Number(row.installations || 0),
+        active_users: activeUsers,
+        selected_users: selectedUsers,
+        validations: Number(row.validations || 0),
+        products: Number(row.products || 0),
+        selection_rate: activeUsers ? selectedUsers / activeUsers : 0,
+        items: [],
+      };
+      wavesById.set(id, wave);
+    }
+    const eligibleUsers = Number(row.eligible_users || 0);
+    const productSelectedUsers = Number(row.product_selected_users || 0);
+    wave.items.push({
+      marketplace: row.marketplace,
+      asin: row.asin,
+      name: row.name,
+      selected_users: productSelectedUsers,
+      validations: Number(row.product_validations || 0),
+      eligible_users: eligibleUsers,
+      selection_rate: eligibleUsers ? productSelectedUsers / eligibleUsers : 0,
+    });
+  }
+
+  const payload = {
+    generated_at: now,
+    window_days: retentionDays,
+    methodology: "Statistiques anonymes amzinvite, dédupliquées par installation et ASIN.",
+    waves: Array.from(wavesById.values()),
+  };
+  const responseHeaders = {
+    "Cache-Control": `public, max-age=300, s-maxage=${PUBLIC_WAVES_CACHE_TTL_SEC}, stale-while-revalidate=86400`,
+    "X-Amzinvite-Cache": "MISS",
+  };
+  if (cache) {
+    const write = cache.put(cacheKey, json(payload, 200, responseHeaders));
+    if (ctx?.waitUntil) ctx.waitUntil(write);
+    else await write;
+  }
+  return json(payload, 200, responseHeaders);
+}
 
 // ─────────────────────────────────────────────────────────────────────────
 // POST /api/extension/register
