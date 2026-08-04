@@ -29,7 +29,8 @@ const response = await worker.fetch(new Request(
 assert.equal(response.status, 200);
 assert.equal(prepared.length, 1);
 assert.deepEqual(prepared[0].args, [1785600000]);
-assert.match(prepared[0].sql, /o\.received_at > \?/);
+assert.match(prepared[0].sql, /FROM observations_hourly/);
+assert.match(prepared[0].sql, /received_at > \?1/);
 assert.doesNotMatch(prepared[0].sql, /FROM observations priced/);
 assert.deepEqual((await response.json()).observations, [
   { asin: "B0TEST0001", last_seen: 1785609600 },

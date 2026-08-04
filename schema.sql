@@ -47,6 +47,22 @@ CREATE TABLE IF NOT EXISTS extension_feedback (
 );
 CREATE INDEX IF NOT EXISTS idx_feedback_received_at ON extension_feedback(received_at DESC);
 
+-- Feedback horaire dédupliqué : une ligne maximum par installation, produit,
+-- état et source. La PK commence par l'heure pour servir directement les stats.
+CREATE TABLE IF NOT EXISTS feedback_hourly (
+  hour              INTEGER NOT NULL,
+  instance_id       TEXT NOT NULL,
+  marketplace       TEXT NOT NULL,
+  asin              TEXT NOT NULL,
+  state             TEXT NOT NULL,
+  source            TEXT NOT NULL DEFAULT '',
+  first_observed_at INTEGER,
+  last_observed_at  INTEGER,
+  first_received_at INTEGER NOT NULL,
+  last_received_at  INTEGER NOT NULL,
+  PRIMARY KEY (hour, instance_id, marketplace, asin, state, source)
+) WITHOUT ROWID;
+
 -- Credentials HMAC aléatoires v2. Les credentials "instance" sont liés à
 -- l'UUID anonyme ; ceux d'"observations" sont courts et non rattachés.
 CREATE TABLE IF NOT EXISTS extension_credentials (
@@ -92,6 +108,23 @@ CREATE TABLE IF NOT EXISTS observations (
   received_at    INTEGER NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_observations_received_at ON observations(received_at DESC);
+
+-- Dernière observation utile par produit et par heure. Une remontée identique
+-- ne réécrit aucune ligne ; un changement de prix ou de stock met la ligne à jour.
+CREATE TABLE IF NOT EXISTS observations_hourly (
+  hour              INTEGER NOT NULL,
+  marketplace       TEXT NOT NULL,
+  asin              TEXT NOT NULL,
+  name              TEXT,
+  price_cents       INTEGER,
+  in_stock          INTEGER,
+  stock_status      TEXT,
+  image_url         TEXT,
+  day_bucket        TEXT,
+  first_received_at INTEGER NOT NULL,
+  last_received_at  INTEGER NOT NULL,
+  PRIMARY KEY (hour, marketplace, asin)
+) WITHOUT ROWID;
 
 -- Historique des anciens compteurs D1. Le Worker utilise désormais les
 -- bindings Rate Limiting natifs et n'écrit plus dans cette table.

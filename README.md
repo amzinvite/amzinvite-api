@@ -74,6 +74,18 @@ upsert admin peut fournir `marketplaces` pour déclarer explicitement les
 snapshots remplacés : un snapshot Belgique vide ne désactive ainsi aucune ligne
 France.
 
+Les feedbacks répétitifs sont dédupliqués par heure dans `feedback_hourly` sur
+`(instance, marketplace, asin, état, source)`. Seuls les états `available`,
+`accepted` et la source `auto_request` restent également conservés en brut.
+Les statistiques admin combinent automatiquement l'ancien historique brut et
+les agrégats créés depuis la migration.
+
+Les observations utilisent également un agrégat horaire par marketplace et
+ASIN. Une remontée identique ne provoque aucune réécriture, tandis qu'un
+changement de prix ou de stock remplace la valeur de l'heure. Un cron quotidien
+purge par défaut les données brutes et horaires âgées de plus de 14 jours ; il
+peut être neutralisé avec `DATA_RETENTION_ENABLED=false`.
+
 Le même upsert accepte `monitoring_products` et `monitoring_marketplaces` pour
 remplacer le catalogue silencieux par marketplace. Ce catalogue est séparé des
 invitations : il n'autorise ni notification ni auto-demande dans l'extension.

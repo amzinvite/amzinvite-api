@@ -53,6 +53,7 @@ const env = {
   DB: {
     prepare(sql) {
       return {
+        sql,
         bind(...args) { this.args = args; return this; },
         async first() {
           if (/FROM extension_credentials/.test(sql)) {
@@ -88,8 +89,9 @@ const response = await worker.fetch(new Request("https://api.test/api/extension/
 assert.equal(response.status, 200);
 assert.equal((await response.json()).inserted, 2);
 assert.equal(inserted.length, 2);
-assert.equal(inserted[0].args[2], 1249);
-assert.equal(inserted[0].args[6], "amazon.fr");
-assert.equal(inserted[1].args[6], "amazon.com.be");
+assert.match(inserted[0].sql, /ON CONFLICT\(hour, marketplace, asin\) DO UPDATE/);
+assert.equal(inserted[0].args[1], "amazon.fr");
+assert.equal(inserted[0].args[4], 1249);
+assert.equal(inserted[1].args[1], "amazon.com.be");
 
 console.log("  ✓ observations : normalisation et dédoublonnage indépendant par marketplace + ASIN");

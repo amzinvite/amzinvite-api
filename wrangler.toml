@@ -58,6 +58,11 @@ period = 60
 [vars]
 FEED_AUTH_ENFORCE = "true"
 EXTENSION_LEGACY_AUTH_ENABLED = "false"
+DATA_RETENTION_ENABLED = "true"
+DATA_RETENTION_DAYS = "14"
+
+[triggers]
+crons = ["17 3 * * *"]
 
 [observability]
 enabled = true

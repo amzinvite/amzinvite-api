@@ -52,6 +52,8 @@ const OBSERVATION_CREDENTIAL_TTL_SEC = 48 * 60 * 60;
 const DEFAULT_ADMIN_STATS_HOURS = 48;
 const MAX_ADMIN_STATS_HOURS = 7 * 24;
 const ADMIN_STATS_CACHE_TTL_SEC = 30 * 60;
+const RAW_FEEDBACK_STATES = new Set(["available", "accepted"]);
+const DEFAULT_RETENTION_DAYS = 14;
 
 export function normalizeObservationPrice(value) {
   if (value == null || value === "") return null;
@@ -107,6 +109,11 @@ export default {
     } catch (err) {
       return json({ error: "internal", detail: String(err) }, 500);
     }
+  },
+
+  async scheduled(_controller, env, ctx) {
+    if (env.DATA_RETENTION_ENABLED === "false") return;
+    ctx.waitUntil(purgeExpiredData(env));
   },
 };
 
@@ -317,19 +324,46 @@ async function handleFeedback(request, env) {
     return json({ error: "rate_limit" }, 429);
   }
 
-  await env.DB.prepare(
-    `INSERT INTO extension_feedback (instance_id, marketplace, asin, state, source, observed_at, received_at, ip_hash)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+  const now = Math.floor(Date.now() / 1000);
+  const hour = Math.floor(now / 3600) * 3600;
+  const asin = payload.asin.toUpperCase();
+  const source = payload.source || "";
+  const statements = [env.DB.prepare(
+    `INSERT OR IGNORE INTO feedback_hourly
+       (hour, instance_id, marketplace, asin, state, source,
+        first_observed_at, last_observed_at, first_received_at, last_received_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
   ).bind(
+    hour,
     instanceId,
     marketplace,
-    payload.asin.toUpperCase(),
+    asin,
     payload.state,
-    payload.source || null,
+    source,
     payload.observedAt || null,
-    Math.floor(Date.now() / 1000),
-    null,
-  ).run();
+    payload.observedAt || null,
+    now,
+    now,
+  )];
+
+  if (RAW_FEEDBACK_STATES.has(payload.state) || source === "auto_request") {
+    statements.push(env.DB.prepare(
+      `INSERT INTO extension_feedback
+         (instance_id, marketplace, asin, state, source, observed_at, received_at, ip_hash)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+    ).bind(
+      instanceId,
+      marketplace,
+      asin,
+      payload.state,
+      source || null,
+      payload.observedAt || null,
+      now,
+      null,
+    ));
+  }
+
+  await env.DB.batch(statements);
 
   return json({ ok: true });
 }
@@ -380,18 +414,36 @@ async function handleObservations(request, env) {
     return json({ ok: true, inserted: 0, deduped: payload.items.length });
   }
 
+  const hour = Math.floor(now / 3600) * 3600;
   const stmts = acceptedItems.map((it) => env.DB.prepare(
-    `INSERT INTO observations (asin, name, price_cents, in_stock, stock_status, image_url, marketplace, day_bucket, received_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    `INSERT INTO observations_hourly
+       (hour, marketplace, asin, name, price_cents, in_stock, stock_status,
+        image_url, day_bucket, first_received_at, last_received_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+     ON CONFLICT(hour, marketplace, asin) DO UPDATE SET
+       name = excluded.name,
+       price_cents = excluded.price_cents,
+       in_stock = excluded.in_stock,
+       stock_status = excluded.stock_status,
+       image_url = excluded.image_url,
+       day_bucket = excluded.day_bucket,
+       last_received_at = excluded.last_received_at
+     WHERE observations_hourly.name IS NOT excluded.name
+        OR observations_hourly.price_cents IS NOT excluded.price_cents
+        OR observations_hourly.in_stock IS NOT excluded.in_stock
+        OR observations_hourly.stock_status IS NOT excluded.stock_status
+        OR observations_hourly.image_url IS NOT excluded.image_url`,
   ).bind(
+    hour,
+    it.marketplace,
     (it.external_id || it.asin || "").toUpperCase(),
     it.name || null,
     normalizeObservationPrice(it.price),
     normalizeObservationStock(it.in_stock),
     it.stock_status || null,
     it.image_url || null,
-    it.marketplace,
     payload.dayBucket || null,
+    now,
     now,
   ));
   await env.DB.batch(stmts);
@@ -515,9 +567,8 @@ async function handleAdminUpsert(request, env) {
 
   for (const marketplace of scopes) {
     const asins = normalizedInvitations.filter((inv) => inv.marketplace === marketplace).map((inv) => inv.asin);
-    const placeholders = asins.map(() => "?").join(", ");
     const statement = asins.length
-      ? env.DB.prepare(`UPDATE invitations SET active = 0, last_updated = ? WHERE marketplace = ? AND active = 1 AND asin NOT IN (${placeholders})`).bind(now, marketplace, ...asins)
+      ? env.DB.prepare(`UPDATE invitations SET active = 0, last_updated = ? WHERE marketplace = ? AND active = 1 AND asin NOT IN (SELECT CAST(value AS TEXT) FROM json_each(?))`).bind(now, marketplace, JSON.stringify(asins))
       : env.DB.prepare("UPDATE invitations SET active = 0, last_updated = ? WHERE marketplace = ? AND active = 1").bind(now, marketplace);
     await statement.run();
   }
@@ -549,9 +600,8 @@ async function handleAdminUpsert(request, env) {
       const asins = normalizedMonitoring
         .filter((item) => item.marketplace === marketplace)
         .map((item) => item.asin);
-      const placeholders = asins.map(() => "?").join(", ");
       const statement = asins.length
-        ? env.DB.prepare(`UPDATE monitoring_products SET active = 0, last_updated = ? WHERE marketplace = ? AND active = 1 AND asin NOT IN (${placeholders})`).bind(now, marketplace, ...asins)
+        ? env.DB.prepare(`UPDATE monitoring_products SET active = 0, last_updated = ? WHERE marketplace = ? AND active = 1 AND asin NOT IN (SELECT CAST(value AS TEXT) FROM json_each(?))`).bind(now, marketplace, JSON.stringify(asins))
         : env.DB.prepare("UPDATE monitoring_products SET active = 0, last_updated = ? WHERE marketplace = ? AND active = 1").bind(now, marketplace);
       await statement.run();
     }
@@ -583,16 +633,32 @@ async function handleAdminSync(request, env) {
   // localement le dernier prix connu lorsqu'une observation n'en contient pas,
   // donc aucune seconde recherche corrélée par ASIN n'est nécessaire ici.
   const obsResult = await env.DB.prepare(
-    `SELECT asin, name, price_cents, in_stock, stock_status, image_url, marketplace,
-            received_at AS last_seen
+    `WITH observation_cutover AS (
+       SELECT MIN(hour) AS first_hour FROM observations_hourly
+     ), combined AS (
+       SELECT asin, name, price_cents, in_stock, stock_status, image_url,
+              marketplace, last_received_at AS last_seen
+         FROM observations_hourly
+        WHERE last_received_at > ?1
+       UNION ALL
+       SELECT asin, name, price_cents, in_stock, stock_status, image_url,
+              marketplace, received_at AS last_seen
+         FROM observations
+        WHERE received_at > ?1
+          AND received_at < COALESCE(
+            (SELECT first_hour FROM observation_cutover),
+            9223372036854775807
+          )
+     )
+     SELECT asin, name, price_cents, in_stock, stock_status, image_url,
+            marketplace, last_seen
        FROM (
-         SELECT o.*,
+         SELECT combined.*,
                 ROW_NUMBER() OVER (
-                  PARTITION BY o.marketplace, o.asin
-                  ORDER BY o.received_at DESC, o.id DESC
+                  PARTITION BY marketplace, asin
+                  ORDER BY last_seen DESC
                 ) AS rn
-           FROM observations o
-          WHERE o.received_at > ?
+           FROM combined
        )
       WHERE rn = 1
       ORDER BY last_seen DESC
@@ -605,6 +671,38 @@ async function handleAdminSync(request, env) {
     since,
     generated_at: Math.floor(Date.now() / 1000),
   });
+}
+
+async function purgeExpiredData(env) {
+  const configuredDays = Number.parseInt(env.DATA_RETENTION_DAYS || "", 10);
+  const retentionDays = Number.isFinite(configuredDays)
+    ? Math.max(7, Math.min(90, configuredDays))
+    : DEFAULT_RETENTION_DAYS;
+  const cutoff = Math.floor(Date.now() / 1000) - retentionDays * 86400;
+  const cutoffHour = Math.floor(cutoff / 3600) * 3600;
+
+  await env.DB.batch([
+    env.DB.prepare(
+      `DELETE FROM extension_feedback
+        WHERE id IN (
+          SELECT id FROM extension_feedback
+           WHERE received_at < ?
+           ORDER BY received_at
+           LIMIT 5000
+        )`,
+    ).bind(cutoff),
+    env.DB.prepare("DELETE FROM feedback_hourly WHERE hour < ?").bind(cutoffHour),
+    env.DB.prepare(
+      `DELETE FROM observations
+        WHERE id IN (
+          SELECT id FROM observations
+           WHERE received_at < ?
+           ORDER BY received_at
+           LIMIT 5000
+        )`,
+    ).bind(cutoff),
+    env.DB.prepare("DELETE FROM observations_hourly WHERE hour < ?").bind(cutoffHour),
+  ]);
 }
 
 // ─────────────────────────────────────────────────────────────────────────
@@ -654,13 +752,26 @@ async function handleAdminStats(request, env, ctx) {
           WHERE scope = 'instance'
             AND instance_id IS NOT NULL
           GROUP BY instance_id
+       ), feedback_cutover AS (
+         SELECT MIN(hour) AS first_hour FROM feedback_hourly
+       ), feedback_24h_rows AS (
+         SELECT instance_id, state, source
+           FROM feedback_hourly
+          WHERE last_received_at >= ?1
+         UNION ALL
+         SELECT instance_id, state, COALESCE(source, '')
+           FROM extension_feedback
+          WHERE received_at >= ?1
+            AND received_at < COALESCE(
+              (SELECT first_hour FROM feedback_cutover),
+              9223372036854775807
+            )
        ), feedback_24h AS (
          SELECT COUNT(DISTINCT instance_id) AS scanning_users_24h,
                 COUNT(DISTINCT CASE WHEN source = 'auto_request' THEN instance_id END) AS auto_request_users_24h,
                 COUNT(DISTINCT CASE WHEN state = 'accepted' THEN instance_id END) AS accepted_users_24h,
                 COUNT(*) AS feedback_events_24h
-           FROM extension_feedback
-          WHERE received_at >= ?1
+           FROM feedback_24h_rows
        )
        SELECT
          (SELECT COUNT(*) FROM installs) AS installations_seen,
@@ -691,13 +802,30 @@ async function handleAdminStats(request, env, ctx) {
         ORDER BY hour`,
     ).bind(startHour),
     env.DB.prepare(
-      `SELECT CAST(received_at / 3600 AS INTEGER) * 3600 AS hour,
+      `WITH feedback_cutover AS (
+         SELECT MIN(hour) AS first_hour FROM feedback_hourly
+       ), feedback_rows AS (
+         SELECT hour, instance_id, state, source
+           FROM feedback_hourly
+          WHERE hour >= ?1
+         UNION ALL
+         SELECT CAST(received_at / 3600 AS INTEGER) * 3600,
+                instance_id,
+                state,
+                COALESCE(source, '')
+           FROM extension_feedback
+          WHERE received_at >= ?1
+            AND received_at < COALESCE(
+              (SELECT first_hour FROM feedback_cutover),
+              9223372036854775807
+            )
+       )
+       SELECT hour,
               COUNT(DISTINCT instance_id) AS scanning_users,
               COUNT(*) AS feedback_events,
               COUNT(DISTINCT CASE WHEN source = 'auto_request' THEN instance_id END) AS auto_request_users,
               COUNT(DISTINCT CASE WHEN state = 'accepted' THEN instance_id END) AS accepted_users
-         FROM extension_feedback
-        WHERE received_at >= ?1
+         FROM feedback_rows
         GROUP BY hour
         ORDER BY hour`,
     ).bind(startHour),
