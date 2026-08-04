@@ -130,7 +130,7 @@ export default {
 // ─────────────────────────────────────────────────────────────────────────
 async function handlePublicWaves(env, ctx) {
   const cache = globalThis.caches?.default;
-  const cacheKey = new Request("https://waves-cache.amzinvite.internal/v3");
+  const cacheKey = new Request("https://waves-cache.amzinvite.internal/v4");
   const cached = cache ? await cache.match(cacheKey) : null;
   if (cached) {
     return json(await cached.json(), 200, {
