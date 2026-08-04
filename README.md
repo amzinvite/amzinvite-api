@@ -30,6 +30,7 @@ Ce service :
 |---|---|---|
 | `GET` | `/api/public/invitations?marketplaces=amazon.fr,amazon.com.be` | Feed curé par marketplace (sans filtre : FR historique), requête signée HMAC exacte et non cachable |
 | `GET` | `/api/extension/monitoring?marketplaces=amazon.fr&limit=20` | Lot stable de produits à surveiller, signé avec le credential de l'installation et borné à 40 URLs |
+| `GET` | `/api/public/waves` | Vagues anonymes agrégées ; le total d'installations exclut les identifiants techniques non réutilisés après une heure |
 | `POST` | `/api/extension/register` | Enrôlement d'un credential HMAC aléatoire v2 |
 | `POST` | `/api/extension/feedback` | Détections anonymes envoyées par l'extension |
 | `POST` | `/api/extension/observations` | Observations anonymes envoyées par l'extension |

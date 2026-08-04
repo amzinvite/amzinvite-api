@@ -24,6 +24,7 @@ function makeEnv() {
           };
         }
         assert.match(sql, /accepted_runs/);
+        assert.match(sql, /c\.last_used_at - c\.created_at > 3600/);
         return {
           bind(cutoff) {
             assert.ok(Number.isFinite(cutoff));
@@ -65,6 +66,7 @@ try {
   const payload = await response.json();
   assert.equal(payload.waves.length, 2);
   assert.equal(payload.waves[0].active_users, 396);
+  assert.match(payload.methodology, /installation durable/);
   assert.equal(payload.waves[0].items.length, 2);
   assert.equal(payload.waves[0].items[0].selection_rate, 10 / 120);
   assert.equal(payload.waves[0].items[0].image_url, "https://m.media-amazon.com/images/I/tripack.jpg");

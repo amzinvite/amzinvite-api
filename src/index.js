@@ -130,7 +130,7 @@ export default {
 // ─────────────────────────────────────────────────────────────────────────
 async function handlePublicWaves(env, ctx) {
   const cache = globalThis.caches?.default;
-  const cacheKey = new Request("https://waves-cache.amzinvite.internal/v6");
+  const cacheKey = new Request("https://waves-cache.amzinvite.internal/v7");
   const cached = cache ? await cache.match(cacheKey) : null;
   if (cached) {
     return json(await cached.json(), 200, {
@@ -194,6 +194,7 @@ async function handlePublicWaves(env, ctx) {
          FROM wave_bounds b
          LEFT JOIN extension_credentials c
            ON c.scope = 'instance' AND c.instance_id IS NOT NULL AND c.created_at < b.ended_at
+          AND c.last_used_at - c.created_at > 3600
         GROUP BY b.wave_id
      ), product_summary AS (
        SELECT b.wave_id, e.marketplace, e.asin,
@@ -328,7 +329,7 @@ async function handlePublicWaves(env, ctx) {
   const payload = {
     generated_at: now,
     window_days: retentionDays,
-    methodology: "Statistiques anonymes amzinvite, dédupliquées par installation et ASIN.",
+    methodology: "Statistiques anonymes amzinvite, dédupliquées par installation durable et ASIN. Une installation est confirmée après plus d’une heure de réutilisation du même identifiant anonyme.",
     waves: Array.from(wavesById.values()).sort((a, b) => b.started_at - a.started_at),
   };
   const responseHeaders = {
