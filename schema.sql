@@ -63,6 +63,37 @@ CREATE TABLE IF NOT EXISTS feedback_hourly (
   PRIMARY KEY (hour, instance_id, marketplace, asin, state, source)
 ) WITHOUT ROWID;
 
+-- Archives publiques strictement agrégées des vagues d'invitations. Elles
+-- survivent à la purge des événements anonymes individuels.
+CREATE TABLE IF NOT EXISTS invitation_waves (
+  id TEXT PRIMARY KEY,
+  started_at INTEGER NOT NULL UNIQUE,
+  ended_at INTEGER NOT NULL,
+  finalized_at INTEGER NOT NULL,
+  installations INTEGER NOT NULL,
+  active_users INTEGER NOT NULL,
+  selected_users INTEGER NOT NULL,
+  validations INTEGER NOT NULL,
+  products INTEGER NOT NULL,
+  selection_rate REAL NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_invitation_waves_started
+  ON invitation_waves(started_at DESC);
+
+CREATE TABLE IF NOT EXISTS invitation_wave_products (
+  wave_id TEXT NOT NULL,
+  marketplace TEXT NOT NULL,
+  asin TEXT NOT NULL,
+  name TEXT NOT NULL,
+  image_url TEXT,
+  selected_users INTEGER NOT NULL,
+  validations INTEGER NOT NULL,
+  eligible_users INTEGER NOT NULL,
+  selection_rate REAL NOT NULL,
+  PRIMARY KEY (wave_id, marketplace, asin),
+  FOREIGN KEY (wave_id) REFERENCES invitation_waves(id) ON DELETE CASCADE
+);
+
 -- Credentials HMAC aléatoires v2. Les credentials "instance" sont liés à
 -- l'UUID anonyme ; ceux d'"observations" sont courts et non rattachés.
 CREATE TABLE IF NOT EXISTS extension_credentials (
