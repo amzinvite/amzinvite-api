@@ -12,6 +12,7 @@ try {
   const env = {
     DATA_RETENTION_ENABLED: "true",
     DATA_RETENTION_DAYS: "14",
+    WAVE_ARCHIVE_ENABLED: "false",
     DB: {
       prepare(sql) {
         return {
@@ -39,10 +40,10 @@ try {
   assert.equal(statements[0].args[0], Math.floor(NOW_MS / 1000) - 14 * 86400);
 
   let disabledCalled = false;
-  await worker.scheduled({}, { DATA_RETENTION_ENABLED: "false" }, {
+  await worker.scheduled({}, { DATA_RETENTION_ENABLED: "false", WAVE_ARCHIVE_ENABLED: "false" }, {
     waitUntil() { disabledCalled = true; },
   });
-  assert.equal(disabledCalled, false);
+  assert.equal(disabledCalled, true);
 
   console.log("retention : purge 14 jours et kill switch validés");
 } finally {

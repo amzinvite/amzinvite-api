@@ -8,6 +8,21 @@ function makeEnv() {
     DATA_RETENTION_DAYS: "14",
     DB: {
       prepare(sql) {
+        if (sql.includes("FROM invitation_waves")) {
+          return {
+            async all() {
+              return { results: [{
+                id: "1785000000", started_at: 1785000000, ended_at: 1785086400,
+                selected_users: 12, validations: 14, products: 1,
+                active_users: 200, installations: 1100, selection_rate: 0.06,
+                marketplace: "amazon.fr", asin: "B0ARCHIVE1",
+                name: "Produit archivé", product_selected_users: 4,
+                product_validations: 4, eligible_users: 100,
+                product_selection_rate: 0.04, image_url: null,
+              }] };
+            },
+          };
+        }
         assert.match(sql, /accepted_runs/);
         return {
           bind(cutoff) {
@@ -48,12 +63,13 @@ try {
   assert.equal(response.status, 200);
   assert.match(response.headers.get("Cache-Control"), /s-maxage=3600/);
   const payload = await response.json();
-  assert.equal(payload.waves.length, 1);
+  assert.equal(payload.waves.length, 2);
   assert.equal(payload.waves[0].active_users, 396);
   assert.equal(payload.waves[0].items.length, 2);
   assert.equal(payload.waves[0].items[0].selection_rate, 10 / 120);
   assert.equal(payload.waves[0].items[0].image_url, "https://m.media-amazon.com/images/I/tripack.jpg");
   assert.equal(payload.waves[0].items[1].image_url, null);
+  assert.equal(payload.waves[1].items[0].name, "Produit archivé");
 
   let reads = 0;
   globalThis.caches = {

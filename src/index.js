@@ -117,8 +117,7 @@ export default {
   },
 
   async scheduled(_controller, env, ctx) {
-    if (env.DATA_RETENTION_ENABLED === "false") return;
-    ctx.waitUntil(purgeExpiredData(env));
+    ctx.waitUntil(runScheduledMaintenance(env));
   },
 };
 
@@ -131,7 +130,7 @@ export default {
 // ─────────────────────────────────────────────────────────────────────────
 async function handlePublicWaves(env, ctx) {
   const cache = globalThis.caches?.default;
-  const cacheKey = new Request("https://waves-cache.amzinvite.internal/v2");
+  const cacheKey = new Request("https://waves-cache.amzinvite.internal/v3");
   const cached = cache ? await cache.match(cacheKey) : null;
   if (cached) {
     return json(await cached.json(), 200, {
@@ -281,11 +280,56 @@ async function handlePublicWaves(env, ctx) {
     });
   }
 
+  const archived = await env.DB.prepare(
+    `SELECT w.id, w.started_at, w.ended_at, w.installations, w.active_users,
+            w.selected_users, w.validations, w.products, w.selection_rate,
+            p.marketplace, p.asin, p.name, p.image_url,
+            p.selected_users AS product_selected_users,
+            p.validations AS product_validations,
+            p.eligible_users, p.selection_rate AS product_selection_rate
+       FROM invitation_waves w
+       JOIN invitation_wave_products p ON p.wave_id = w.id
+      ORDER BY w.started_at DESC, product_selected_users DESC, p.name`,
+  ).all();
+  const archivedById = new Map();
+  for (const row of archived.results || []) {
+    const id = String(row.id);
+    if (wavesById.has(id)) continue;
+    let wave = archivedById.get(id);
+    if (!wave) {
+      wave = {
+        id,
+        started_at: Number(row.started_at),
+        ended_at: Number(row.ended_at),
+        finalized: true,
+        installations: Number(row.installations || 0),
+        active_users: Number(row.active_users || 0),
+        selected_users: Number(row.selected_users || 0),
+        validations: Number(row.validations || 0),
+        products: Number(row.products || 0),
+        selection_rate: Number(row.selection_rate || 0),
+        items: [],
+      };
+      archivedById.set(id, wave);
+    }
+    wave.items.push({
+      marketplace: row.marketplace,
+      asin: row.asin,
+      name: row.name,
+      image_url: safePublicAmazonImage(row.image_url),
+      selected_users: Number(row.product_selected_users || 0),
+      validations: Number(row.product_validations || 0),
+      eligible_users: Number(row.eligible_users || 0),
+      selection_rate: Number(row.product_selection_rate || 0),
+    });
+  }
+  for (const [id, wave] of archivedById) wavesById.set(id, wave);
+
   const payload = {
     generated_at: now,
     window_days: retentionDays,
     methodology: "Statistiques anonymes amzinvite, dédupliquées par installation et ASIN.",
-    waves: Array.from(wavesById.values()),
+    waves: Array.from(wavesById.values()).sort((a, b) => b.started_at - a.started_at),
   };
   const responseHeaders = {
     "Cache-Control": `public, max-age=300, s-maxage=${PUBLIC_WAVES_CACHE_TTL_SEC}, stale-while-revalidate=86400`,
@@ -297,6 +341,63 @@ async function handlePublicWaves(env, ctx) {
     else await write;
   }
   return json(payload, 200, responseHeaders);
+}
+
+async function runScheduledMaintenance(env) {
+  if (env.WAVE_ARCHIVE_ENABLED !== "false") {
+    try {
+      const response = await handlePublicWaves(env, {});
+      if (response.ok) {
+        const payload = await response.json();
+        await persistFinalizedWaves(env, payload.waves || []);
+      }
+    } catch (error) {
+      console.error("wave archive failed", error);
+    }
+  }
+  if (env.DATA_RETENTION_ENABLED !== "false") await purgeExpiredData(env);
+}
+
+async function persistFinalizedWaves(env, waves) {
+  const finalizedAt = Math.floor(Date.now() / 1000);
+  for (const wave of waves) {
+    if (!wave.finalized || Number(wave.ended_at) > finalizedAt) continue;
+    const statements = [
+      env.DB.prepare(
+        `INSERT INTO invitation_waves
+           (id, started_at, ended_at, finalized_at, installations, active_users,
+            selected_users, validations, products, selection_rate)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+         ON CONFLICT(id) DO UPDATE SET
+           ended_at = excluded.ended_at,
+           finalized_at = excluded.finalized_at,
+           installations = excluded.installations,
+           active_users = excluded.active_users,
+           selected_users = excluded.selected_users,
+           validations = excluded.validations,
+           products = excluded.products,
+           selection_rate = excluded.selection_rate`,
+      ).bind(
+        wave.id, wave.started_at, wave.ended_at, finalizedAt,
+        wave.installations, wave.active_users, wave.selected_users,
+        wave.validations, wave.products, wave.selection_rate,
+      ),
+      env.DB.prepare("DELETE FROM invitation_wave_products WHERE wave_id = ?1").bind(wave.id),
+      ...wave.items
+        .filter((item) => Number(item.selected_users) >= 1)
+        .map((item) => env.DB.prepare(
+          `INSERT INTO invitation_wave_products
+             (wave_id, marketplace, asin, name, image_url, selected_users,
+              validations, eligible_users, selection_rate)
+           VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)`,
+        ).bind(
+          wave.id, item.marketplace, item.asin, item.name, item.image_url,
+          item.selected_users, item.validations, item.eligible_users,
+          item.selection_rate,
+        )),
+    ];
+    await env.DB.batch(statements);
+  }
 }
 
 function safePublicAmazonImage(value) {
