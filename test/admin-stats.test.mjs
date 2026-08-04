@@ -27,7 +27,10 @@ function makeEnv() {
         {
           results: [{
             installations_seen: 311,
+            durable_installations_seen: 173,
+            unconfirmed_installations_seen: 138,
             new_installations_24h: 284,
+            new_durable_installations_24h: 146,
             feed_active_24h: 279,
             scanning_users_24h: 162,
             auto_request_users_24h: 121,
@@ -38,7 +41,11 @@ function makeEnv() {
             feed_requests_24h: 0,
           }],
         },
-        { results: [{ hour: CURRENT_HOUR - 3600, new_installations: 57 }] },
+        { results: [{
+          hour: CURRENT_HOUR - 3600,
+          new_installations: 57,
+          new_durable_installations: 31,
+        }] },
         {
           results: [{
             hour: CURRENT_HOUR - 3600,
@@ -81,12 +88,16 @@ try {
   assert.equal(payload.generated_at, NOW);
   assert.equal(payload.window_hours, 48);
   assert.equal(payload.summary.installations_seen, 311);
+  assert.equal(payload.summary.durable_installations_seen, 173);
+  assert.equal(payload.summary.unconfirmed_installations_seen, 138);
+  assert.equal(payload.summary.new_durable_installations_24h, 146);
   assert.equal(payload.summary.auto_request_users_24h, 121);
   assert.equal(payload.hourly.length, 48);
   assert.equal(payload.hourly[0].hour, CURRENT_HOUR - 47 * 3600);
   assert.deepEqual(payload.hourly.at(-2), {
     hour: CURRENT_HOUR - 3600,
     new_installations: 57,
+    new_durable_installations: 31,
     scanning_users: 104,
     feedback_events: 3367,
     auto_request_users: 72,
@@ -96,6 +107,7 @@ try {
     feed_requests: 0,
   });
   assert.equal(payload.hourly.at(-1).new_installations, 0);
+  assert.equal(payload.hourly.at(-1).new_durable_installations, 0);
 
   let cacheMatchCalls = 0;
   let cachePutCalls = 0;

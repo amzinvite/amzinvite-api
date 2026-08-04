@@ -8,6 +8,12 @@ bornée à sept jours. Son résultat est calculé au maximum une fois toutes les
 30 minutes par datacenter Cloudflare. Il alimente le cockpit PrixTCG sans
 exposer les identifiants d'instance ni les empreintes réseau.
 
+Le compteur distingue les enrôlements techniques bruts des installations
+durables. Une instance devient durable uniquement après avoir réutilisé son
+credential plus d'une heure après son premier enrôlement. Cette confirmation
+différée écarte les UUID éphémères qu'un démarrage concurrent d'une ancienne
+version de l'extension a pu produire, sans supprimer l'historique D1.
+
 ## Rôle
 
 Ce service :

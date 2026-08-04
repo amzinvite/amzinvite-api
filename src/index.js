@@ -1071,7 +1071,14 @@ async function handleAdminStats(request, env, ctx) {
        )
        SELECT
          (SELECT COUNT(*) FROM installs) AS installations_seen,
+         (SELECT COUNT(*) FROM installs
+           WHERE last_used - first_created > 3600) AS durable_installations_seen,
+         (SELECT COUNT(*) FROM installs
+           WHERE last_used - first_created <= 3600) AS unconfirmed_installations_seen,
          (SELECT COUNT(*) FROM installs WHERE first_created >= ?1) AS new_installations_24h,
+         (SELECT COUNT(*) FROM installs
+           WHERE first_created >= ?1
+             AND last_used - first_created > 3600) AS new_durable_installations_24h,
          (SELECT COUNT(*) FROM extension_auth_activity WHERE last_seen >= ?1) AS feed_active_24h,
          feedback_24h.scanning_users_24h,
          feedback_24h.auto_request_users_24h,
@@ -1084,14 +1091,18 @@ async function handleAdminStats(request, env, ctx) {
     ).bind(trailing24h),
     env.DB.prepare(
       `WITH installs AS (
-         SELECT instance_id, MIN(created_at) AS first_created
+         SELECT instance_id,
+                MIN(created_at) AS first_created,
+                MAX(COALESCE(last_used_at, 0)) AS last_used
            FROM extension_credentials
           WHERE scope = 'instance'
             AND instance_id IS NOT NULL
           GROUP BY instance_id
        )
        SELECT CAST(first_created / 3600 AS INTEGER) * 3600 AS hour,
-              COUNT(*) AS new_installations
+              COUNT(*) AS new_installations,
+              COUNT(CASE WHEN last_used - first_created > 3600 THEN 1 END)
+                AS new_durable_installations
          FROM installs
         WHERE first_created >= ?1
         GROUP BY hour
@@ -1130,6 +1141,7 @@ async function handleAdminStats(request, env, ctx) {
   const hourly = Array.from({ length: hours }, (_, index) => ({
     hour: startHour + index * 3600,
     new_installations: 0,
+    new_durable_installations: 0,
     scanning_users: 0,
     feedback_events: 0,
     auto_request_users: 0,
@@ -1146,13 +1158,16 @@ async function handleAdminStats(request, env, ctx) {
       for (const field of fields) target[field] = Number(source[field] || 0);
     }
   };
-  mergeRows(installsResult, ["new_installations"]);
+  mergeRows(installsResult, ["new_installations", "new_durable_installations"]);
   mergeRows(feedbackResult, ["scanning_users", "feedback_events", "auto_request_users", "accepted_users"]);
 
   const summarySource = summaryResult.results?.[0] || {};
   const summary = Object.fromEntries([
     "installations_seen",
+    "durable_installations_seen",
+    "unconfirmed_installations_seen",
     "new_installations_24h",
+    "new_durable_installations_24h",
     "feed_active_24h",
     "scanning_users_24h",
     "auto_request_users_24h",
