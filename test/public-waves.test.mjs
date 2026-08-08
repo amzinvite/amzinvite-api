@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import worker from "../src/index.js";
+import worker, { canonicalWaveSlots } from "../src/index.js";
 
 const originalCaches = globalThis.caches;
 
@@ -23,11 +23,13 @@ function makeEnv() {
             },
           };
         }
-        assert.match(sql, /accepted_runs/);
+        assert.match(sql, /configured_bounds/);
+        assert.doesNotMatch(sql, /accepted_runs/);
         assert.match(sql, /c\.last_used_at - c\.created_at > 3600/);
         return {
-          bind(cutoff) {
+          bind(cutoff, slots) {
             assert.ok(Number.isFinite(cutoff));
+            assert.ok(JSON.parse(slots).length >= 1);
             return this;
           },
           async all() {
@@ -59,10 +61,17 @@ function makeEnv() {
 }
 
 try {
+  const fridaySlots = canonicalWaveSlots(
+    Date.parse("2026-08-07T10:00:00Z") / 1000,
+    Date.parse("2026-07-24T10:00:00Z") / 1000,
+  );
+  assert.ok(fridaySlots.some((slot) => slot.started_at === Date.parse("2026-08-07T08:00:00Z") / 1000));
+  assert.ok(fridaySlots.some((slot) => slot.started_at === Date.parse("2026-08-03T18:00:00Z") / 1000));
+
   globalThis.caches = undefined;
   const response = await worker.fetch(new Request("https://api.test/api/public/waves"), makeEnv(), {});
   assert.equal(response.status, 200);
-  assert.match(response.headers.get("Cache-Control"), /s-maxage=3600/);
+  assert.match(response.headers.get("Cache-Control"), /s-maxage=300/);
   const payload = await response.json();
   assert.equal(payload.waves.length, 2);
   assert.equal(payload.waves[0].active_users, 396);

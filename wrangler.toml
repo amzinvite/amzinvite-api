@@ -62,7 +62,7 @@ DATA_RETENTION_ENABLED = "true"
 DATA_RETENTION_DAYS = "14"
 
 [triggers]
-crons = ["17 3 * * *"]
+crons = ["*/5 * * * *"]
 
 [observability]
 enabled = true

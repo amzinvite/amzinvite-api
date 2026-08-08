@@ -55,7 +55,61 @@ const MAX_ADMIN_STATS_HOURS = 7 * 24;
 const ADMIN_STATS_CACHE_TTL_SEC = 30 * 60;
 const RAW_FEEDBACK_STATES = new Set(["available", "accepted"]);
 const DEFAULT_RETENTION_DAYS = 14;
-const PUBLIC_WAVES_CACHE_TTL_SEC = 60 * 60;
+const PUBLIC_WAVES_CACHE_TTL_SEC = 5 * 60;
+const PARIS_TIME_ZONE = "Europe/Paris";
+const CANONICAL_WAVE_SLOTS = Object.freeze([
+  { weekday: 1, hour: 20, minute: 0 },
+  { weekday: 5, hour: 10, minute: 0 },
+]);
+
+function parisParts(date) {
+  const parts = new Intl.DateTimeFormat("fr-FR", {
+    timeZone: PARIS_TIME_ZONE,
+    year: "numeric", month: "2-digit", day: "2-digit",
+    hour: "2-digit", minute: "2-digit", second: "2-digit",
+    hourCycle: "h23",
+  }).formatToParts(date);
+  return Object.fromEntries(parts
+    .filter((part) => part.type !== "literal")
+    .map((part) => [part.type, Number(part.value)]));
+}
+
+function parisDateTimeToEpoch(year, month, day, hour, minute) {
+  const wallClockUtc = Date.UTC(year, month - 1, day, hour, minute);
+  const initialParts = parisParts(new Date(wallClockUtc));
+  const initialOffset = Date.UTC(
+    initialParts.year, initialParts.month - 1, initialParts.day,
+    initialParts.hour, initialParts.minute, initialParts.second,
+  ) - wallClockUtc;
+  const candidate = wallClockUtc - initialOffset;
+  const corrected = parisParts(new Date(candidate));
+  const correctedOffset = Date.UTC(
+    corrected.year, corrected.month - 1, corrected.day,
+    corrected.hour, corrected.minute, corrected.second,
+  ) - candidate;
+  return Math.round((wallClockUtc - correctedOffset) / 1000);
+}
+
+export function canonicalWaveSlots(nowEpoch, cutoffEpoch) {
+  const now = new Date(Number(nowEpoch) * 1000);
+  const current = parisParts(now);
+  const parisDayUtc = Date.UTC(current.year, current.month - 1, current.day);
+  const slots = [];
+  for (let dayOffset = -21; dayOffset <= 1; dayOffset++) {
+    const day = new Date(parisDayUtc + dayOffset * 86400000);
+    for (const slot of CANONICAL_WAVE_SLOTS) {
+      if (day.getUTCDay() !== slot.weekday) continue;
+      const startedAt = parisDateTimeToEpoch(
+        day.getUTCFullYear(), day.getUTCMonth() + 1, day.getUTCDate(),
+        slot.hour, slot.minute,
+      );
+      if (startedAt <= nowEpoch && startedAt + 86400 >= cutoffEpoch) {
+        slots.push({ id: String(startedAt), started_at: startedAt, ended_at: startedAt + 86400 });
+      }
+    }
+  }
+  return slots.sort((a, b) => a.started_at - b.started_at);
+}
 
 export function normalizeObservationPrice(value) {
   if (value == null || value === "") return null;
@@ -130,7 +184,7 @@ export default {
 // ─────────────────────────────────────────────────────────────────────────
 async function handlePublicWaves(env, ctx) {
   const cache = globalThis.caches?.default;
-  const cacheKey = new Request("https://waves-cache.amzinvite.internal/v7");
+  const cacheKey = new Request("https://waves-cache.amzinvite.internal/v8");
   const cached = cache ? await cache.match(cacheKey) : null;
   if (cached) {
     return json(await cached.json(), 200, {
@@ -142,37 +196,33 @@ async function handlePublicWaves(env, ctx) {
   const now = Math.floor(Date.now() / 1000);
   const retentionDays = Math.max(7, Math.min(90, Number.parseInt(env.DATA_RETENTION_DAYS || "14", 10) || 14));
   const cutoff = now - retentionDays * 86400;
+  const waveSlots = canonicalWaveSlots(now, cutoff);
   const result = await env.DB.prepare(
     `WITH accepted_hours AS (
        SELECT instance_id, marketplace, asin, hour,
-              COALESCE(first_observed_at, first_received_at) AS observed_at,
-              LAG(hour) OVER (
-                PARTITION BY instance_id, marketplace, asin ORDER BY hour
-              ) AS previous_hour
+              COALESCE(first_observed_at, first_received_at) AS observed_at
          FROM feedback_hourly
         WHERE state = 'accepted' AND hour >= ?1
-     ), accepted_runs AS (
-       SELECT *,
-              SUM(CASE WHEN previous_hour IS NULL OR hour - previous_hour >= 129600 THEN 1 ELSE 0 END)
-                OVER (PARTITION BY instance_id, marketplace, asin ORDER BY hour) AS run_id
-         FROM accepted_hours
      ), acceptance_events AS (
-       SELECT instance_id, marketplace, asin, run_id, MIN(observed_at) AS accepted_at
-         FROM accepted_runs
-        GROUP BY instance_id, marketplace, asin, run_id
-     ), ordered_events AS (
-       SELECT *, LAG(accepted_at) OVER (ORDER BY accepted_at) AS previous_event
-         FROM acceptance_events
+       SELECT instance_id, marketplace, asin, MIN(observed_at) AS accepted_at
+         FROM accepted_hours
+        GROUP BY instance_id, marketplace, asin
+     ), configured_bounds AS (
+       SELECT CAST(json_extract(value, '$.id') AS TEXT) AS wave_id,
+              CAST(json_extract(value, '$.started_at') AS INTEGER) AS started_at,
+              CAST(json_extract(value, '$.ended_at') AS INTEGER) AS ended_at
+         FROM json_each(?2)
      ), wave_events AS (
-       SELECT *,
-              SUM(CASE WHEN previous_event IS NULL OR accepted_at - previous_event >= 129600 THEN 1 ELSE 0 END)
-                OVER (ORDER BY accepted_at) AS wave_id
-         FROM ordered_events
+       SELECT b.wave_id, a.instance_id, a.marketplace, a.asin, a.accepted_at
+         FROM configured_bounds b
+         JOIN acceptance_events a
+           ON a.accepted_at >= b.started_at AND a.accepted_at < b.ended_at
      ), wave_bounds AS (
-       SELECT wave_id, MIN(accepted_at) AS started_at, MIN(accepted_at) + 86400 AS ended_at
-         FROM wave_events
-        GROUP BY wave_id
-       HAVING COUNT(DISTINCT instance_id) >= 2
+       SELECT b.wave_id, b.started_at, b.ended_at
+         FROM configured_bounds b
+         JOIN wave_events e ON e.wave_id = b.wave_id
+        GROUP BY b.wave_id, b.started_at, b.ended_at
+       HAVING COUNT(DISTINCT e.instance_id) >= 2
      ), wave_summary AS (
        SELECT b.wave_id, b.started_at, b.ended_at,
               COUNT(DISTINCT e.instance_id) AS selected_users,
@@ -243,7 +293,7 @@ async function handlePublicWaves(env, ctx) {
        LEFT JOIN latest_product_images x
          ON x.marketplace = p.marketplace AND x.asin = p.asin
       ORDER BY s.started_at DESC, product_selected_users DESC, p.name`,
-  ).bind(cutoff).all();
+  ).bind(cutoff, JSON.stringify(waveSlots)).all();
 
   const wavesById = new Map();
   for (const row of result.results || []) {
@@ -295,7 +345,6 @@ async function handlePublicWaves(env, ctx) {
   const archivedById = new Map();
   for (const row of archived.results || []) {
     const id = String(row.id);
-    if (wavesById.has(id)) continue;
     let wave = archivedById.get(id);
     if (!wave) {
       wave = {
@@ -324,7 +373,12 @@ async function handlePublicWaves(env, ctx) {
       selection_rate: Number(row.product_selection_rate || 0),
     });
   }
-  for (const [id, wave] of archivedById) wavesById.set(id, wave);
+  for (const [id, wave] of archivedById) {
+    for (const [liveId, liveWave] of wavesById) {
+      if (Math.abs(liveWave.started_at - wave.started_at) < 3 * 3600) wavesById.delete(liveId);
+    }
+    wavesById.set(id, wave);
+  }
 
   const payload = {
     generated_at: now,
@@ -363,21 +417,17 @@ async function persistFinalizedWaves(env, waves) {
   const finalizedAt = Math.floor(Date.now() / 1000);
   for (const wave of waves) {
     if (!wave.finalized || Number(wave.ended_at) > finalizedAt) continue;
+    const existing = await env.DB.prepare(
+      "SELECT 1 FROM invitation_waves WHERE id = ?1 LIMIT 1",
+    ).bind(wave.id).first();
+    if (existing) continue;
     const statements = [
       env.DB.prepare(
         `INSERT INTO invitation_waves
            (id, started_at, ended_at, finalized_at, installations, active_users,
             selected_users, validations, products, selection_rate)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
-         ON CONFLICT(id) DO UPDATE SET
-           ended_at = excluded.ended_at,
-           finalized_at = excluded.finalized_at,
-           installations = excluded.installations,
-           active_users = excluded.active_users,
-           selected_users = excluded.selected_users,
-           validations = excluded.validations,
-           products = excluded.products,
-           selection_rate = excluded.selection_rate`,
+         ON CONFLICT(id) DO NOTHING`,
       ).bind(
         wave.id, wave.started_at, wave.ended_at, finalizedAt,
         wave.installations, wave.active_users, wave.selected_users,
