@@ -62,7 +62,8 @@ DATA_RETENTION_ENABLED = "true"
 DATA_RETENTION_DAYS = "14"
 
 [triggers]
-crons = ["*/5 * * * *"]
+# Archivage des vagues toutes les 15 minutes ; purge de rétention une fois par jour.
+crons = ["*/15 * * * *", "17 3 * * *"]
 
 [observability]
 enabled = true

@@ -21,9 +21,12 @@ const CORS_HEADERS = {
 
 const HMAC_MAX_DRIFT_SEC = 300; // ±5 min
 const FEED_PATH = "/api/public/invitations";
+const BOOTSTRAP_PATH = "/api/extension/bootstrap";
 const MONITORING_PATH = "/api/extension/monitoring";
+const FEEDBACK_BATCH_PATH = "/api/extension/feedback/batch";
 const DEFAULT_MONITORING_SHARD_SIZE = 20;
 const MAX_MONITORING_SHARD_SIZE = 40;
+const MAX_FEEDBACK_BATCH_ITEMS = 50;
 const SUPPORTED_MARKETPLACES = new Set(["amazon.fr", "amazon.com.be"]);
 
 function normalizeMarketplace(value, fallback = null) {
@@ -140,6 +143,9 @@ export default {
       if (url.pathname === "/api/public/waves" && request.method === "GET") {
         return await handlePublicWaves(env, ctx);
       }
+      if (url.pathname === BOOTSTRAP_PATH && request.method === "GET") {
+        return await handleExtensionBootstrap(request, env, ctx);
+      }
       if (url.pathname === MONITORING_PATH && request.method === "GET") {
         return await handleMonitoringFeed(request, env);
       }
@@ -148,6 +154,9 @@ export default {
       }
       if (url.pathname === "/api/extension/feedback" && request.method === "POST") {
         return await handleFeedback(request, env);
+      }
+      if (url.pathname === FEEDBACK_BATCH_PATH && request.method === "POST") {
+        return await handleFeedbackBatch(request, env);
       }
       if (url.pathname === "/api/extension/observations" && request.method === "POST") {
         return await handleObservations(request, env);
@@ -170,8 +179,8 @@ export default {
     }
   },
 
-  async scheduled(_controller, env, ctx) {
-    ctx.waitUntil(runScheduledMaintenance(env));
+  async scheduled(controller, env, ctx) {
+    ctx.waitUntil(runScheduledMaintenance(env, controller?.cron || null));
   },
 };
 
@@ -398,8 +407,35 @@ async function handlePublicWaves(env, ctx) {
   return json(payload, 200, responseHeaders);
 }
 
-async function runScheduledMaintenance(env) {
-  if (env.WAVE_ARCHIVE_ENABLED !== "false") {
+function upcomingWaveSlots(nowEpoch, count = 6) {
+  const now = new Date(Number(nowEpoch) * 1000);
+  const current = parisParts(now);
+  const parisDayUtc = Date.UTC(current.year, current.month - 1, current.day);
+  const slots = [];
+  for (let dayOffset = -4; dayOffset <= 14 && slots.length < count + 2; dayOffset++) {
+    const day = new Date(parisDayUtc + dayOffset * 86400000);
+    for (const slot of CANONICAL_WAVE_SLOTS) {
+      if (day.getUTCDay() !== slot.weekday) continue;
+      const startedAt = parisDateTimeToEpoch(
+        day.getUTCFullYear(), day.getUTCMonth() + 1, day.getUTCDate(),
+        slot.hour, slot.minute,
+      );
+      if (startedAt + 3 * 86400 > nowEpoch) {
+        slots.push({
+          id: String(startedAt),
+          starts_at: startedAt,
+          ends_at: startedAt + 86400,
+        });
+      }
+    }
+  }
+  return slots.sort((left, right) => left.starts_at - right.starts_at).slice(-count);
+}
+
+async function runScheduledMaintenance(env, cron = null) {
+  const shouldArchive = cron == null || cron === "*/15 * * * *";
+  const shouldPurge = cron == null || cron === "17 3 * * *";
+  if (shouldArchive && env.WAVE_ARCHIVE_ENABLED !== "false") {
     try {
       const response = await handlePublicWaves(env, {});
       if (response.ok) {
@@ -410,7 +446,7 @@ async function runScheduledMaintenance(env) {
       console.error("wave archive failed", error);
     }
   }
-  if (env.DATA_RETENTION_ENABLED !== "false") await purgeExpiredData(env);
+  if (shouldPurge && env.DATA_RETENTION_ENABLED !== "false") await purgeExpiredData(env);
 }
 
 async function persistFinalizedWaves(env, waves) {
@@ -574,6 +610,63 @@ async function handlePublicFeed(request, env) {
   });
 }
 
+async function handleExtensionBootstrap(request, env, ctx) {
+  const auth = await checkFeedAuth(request, env, BOOTSTRAP_PATH);
+  if (!auth.ok) return json({ error: auth.error }, 401);
+
+  const instanceId = request.headers.get("X-Instance-Id");
+  const feedLimit = await env.FEED_RATE_LIMITER.limit({ key: instanceId });
+  if (!feedLimit.success) return json({ error: "rate_limit" }, 429);
+
+  const url = new URL(request.url);
+  const rawMarketplaces = (url.searchParams.get("marketplaces") || "amazon.fr").split(",");
+  const requested = rawMarketplaces.map((value) => normalizeMarketplace(value));
+  if (requested.some((value) => !value)) return json({ error: "bad_marketplaces" }, 400);
+  const marketplaces = [...new Set(requested)];
+  const placeholders = marketplaces.map(() => "?").join(", ");
+  const result = await env.DB.prepare(
+    `SELECT asin, url, name, marketplace, first_seen, is_mirror
+       FROM invitations
+      WHERE active = 1 AND marketplace IN (${placeholders})
+      ORDER BY first_seen DESC
+      LIMIT 200`,
+  ).bind(...marketplaces).all();
+
+  const wavesResponse = await handlePublicWaves(env, ctx);
+  const wavesPayload = wavesResponse.ok ? await wavesResponse.json() : { waves: [] };
+  const now = Math.floor(Date.now() / 1000);
+  const invitations = result.results || [];
+  const latestFinalizedWave = (wavesPayload.waves || []).find((wave) => wave.finalized) || null;
+  let feedHash = 0x811c9dc5;
+  for (const item of invitations) {
+    const value = `${item.marketplace}:${item.asin}:${item.first_seen || 0}|`;
+    for (let index = 0; index < value.length; index++) {
+      feedHash ^= value.charCodeAt(index);
+      feedHash = Math.imul(feedHash, 0x01000193);
+    }
+  }
+  const feedRevision = (feedHash >>> 0).toString(16).padStart(8, "0");
+
+  return json({
+    schema_version: 1,
+    generated_at: now,
+    feed_revision: feedRevision,
+    invitations,
+    schedule: {
+      version: "2026-08-09.1",
+      timezone: PARIS_TIME_ZONE,
+      waves: upcomingWaveSlots(now),
+      // Les checks démarrent uniquement après le début de la vague et couvrent
+      // toute sa fenêtre de 24 h afin d'alimenter le rapport final.
+      scan_offsets_minutes: [5, 35, 90, 180, 360, 720, 1380],
+      jitter_minutes: 12,
+      sync_interval_minutes: 360,
+      custom_interval_minutes: 360,
+    },
+    latest_finalized_wave: latestFinalizedWave,
+  }, 200, { "Cache-Control": "private, no-store" });
+}
+
 function monitoringAssignmentScore(instanceId, item) {
   const value = `${instanceId}:${item.marketplace}:${item.asin}`;
   let hash = 0x811c9dc5;
@@ -655,27 +748,82 @@ async function handleFeedback(request, env) {
   try { payload = JSON.parse(bodyText); }
   catch { return json({ error: "bad_json" }, 400); }
 
-  const marketplace = payload.marketplace == null
-    ? "amazon.fr"
-    : normalizeMarketplace(payload.marketplace);
-  if (!marketplace) return json({ error: "bad_marketplace" }, 400);
-  if (!payload.asin || !/^[A-Z0-9]{10}$/i.test(payload.asin)) {
-    return json({ error: "bad_asin" }, 400);
-  }
-  if (!["available", "already_requested", "accepted", "not_invitation", "stub_no_data"].includes(payload.state)) {
-    return json({ error: "bad_state" }, 400);
-  }
+  const normalized = normalizeFeedbackItem(payload);
+  if (!normalized.ok) return json({ error: normalized.error }, 400);
 
   const instanceLimit = await env.FEEDBACK_RATE_LIMITER.limit({ key: instanceId });
   if (!instanceLimit.success) {
     return json({ error: "rate_limit" }, 429);
   }
 
+  const statements = feedbackStatements(env, instanceId, [normalized.item]);
+  await env.DB.batch(statements);
+
+  return json({ ok: true });
+}
+
+async function handleFeedbackBatch(request, env) {
+  const instanceId = request.headers.get("X-Instance-Id");
+  if (!instanceId || !/^[0-9a-f-]{32,40}$/i.test(instanceId)) {
+    return json({ error: "bad_instance_id" }, 400);
+  }
+  const body = await readLimitedText(request);
+  if (!body.ok) return json({ error: body.error }, body.status);
+  const verified = await verifyExtensionHmac(request, body.text, env, { scope: "instance", instanceId });
+  if (!verified.ok) {
+    return json({ error: verified.error }, request.headers.get("X-Auth-Version") === "2" ? 401 : 400);
+  }
+  let payload;
+  try { payload = JSON.parse(body.text); }
+  catch { return json({ error: "bad_json" }, 400); }
+  if (!Array.isArray(payload.items) || payload.items.length === 0) {
+    return json({ error: "empty_items" }, 400);
+  }
+  if (payload.items.length > MAX_FEEDBACK_BATCH_ITEMS) {
+    return json({ error: "too_many_items" }, 400);
+  }
+  const normalizedItems = [];
+  for (const item of payload.items) {
+    const normalized = normalizeFeedbackItem(item);
+    if (!normalized.ok) return json({ error: normalized.error }, 400);
+    normalizedItems.push(normalized.item);
+  }
+  const instanceLimit = await env.FEEDBACK_RATE_LIMITER.limit({ key: instanceId });
+  if (!instanceLimit.success) return json({ error: "rate_limit" }, 429);
+  const statements = feedbackStatements(env, instanceId, normalizedItems);
+  await env.DB.batch(statements);
+  return json({ ok: true, accepted: normalizedItems.length });
+}
+
+function normalizeFeedbackItem(payload) {
+  const marketplace = payload?.marketplace == null
+    ? "amazon.fr"
+    : normalizeMarketplace(payload.marketplace);
+  if (!marketplace) return { ok: false, error: "bad_marketplace" };
+  if (!payload?.asin || !/^[A-Z0-9]{10}$/i.test(payload.asin)) {
+    return { ok: false, error: "bad_asin" };
+  }
+  if (!["available", "already_requested", "accepted", "not_invitation", "stub_no_data"].includes(payload.state)) {
+    return { ok: false, error: "bad_state" };
+  }
+  return {
+    ok: true,
+    item: {
+      marketplace,
+      asin: payload.asin.toUpperCase(),
+      state: payload.state,
+      source: payload.source || "",
+      observedAt: Number(payload.observedAt) || null,
+    },
+  };
+}
+
+function feedbackStatements(env, instanceId, items) {
   const now = Math.floor(Date.now() / 1000);
   const hour = Math.floor(now / 3600) * 3600;
-  const asin = payload.asin.toUpperCase();
-  const source = payload.source || "";
-  const statements = [env.DB.prepare(
+  const statements = [];
+  for (const item of items) {
+    statements.push(env.DB.prepare(
     `INSERT OR IGNORE INTO feedback_hourly
        (hour, instance_id, marketplace, asin, state, source,
         first_observed_at, last_observed_at, first_received_at, last_received_at)
@@ -683,36 +831,34 @@ async function handleFeedback(request, env) {
   ).bind(
     hour,
     instanceId,
-    marketplace,
-    asin,
-    payload.state,
-    source,
-    payload.observedAt || null,
-    payload.observedAt || null,
+    item.marketplace,
+    item.asin,
+    item.state,
+    item.source,
+    item.observedAt,
+    item.observedAt,
     now,
     now,
-  )];
+  ));
 
-  if (RAW_FEEDBACK_STATES.has(payload.state) || source === "auto_request") {
+  if (RAW_FEEDBACK_STATES.has(item.state) || item.source === "auto_request") {
     statements.push(env.DB.prepare(
       `INSERT INTO extension_feedback
          (instance_id, marketplace, asin, state, source, observed_at, received_at, ip_hash)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
     ).bind(
       instanceId,
-      marketplace,
-      asin,
-      payload.state,
-      source || null,
-      payload.observedAt || null,
+      item.marketplace,
+      item.asin,
+      item.state,
+      item.source || null,
+      item.observedAt,
       now,
       null,
     ));
   }
-
-  await env.DB.batch(statements);
-
-  return json({ ok: true });
+  }
+  return statements;
 }
 
 // ─────────────────────────────────────────────────────────────────────────

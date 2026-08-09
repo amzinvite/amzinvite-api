@@ -27,7 +27,7 @@ try {
     },
   };
 
-  await worker.scheduled({}, env, {
+  await worker.scheduled({ cron: "17 3 * * *" }, env, {
     waitUntil(promise) { scheduledPromise = promise; },
   });
   await scheduledPromise;
@@ -38,6 +38,13 @@ try {
   assert.match(statements[2].sql, /DELETE FROM observations/);
   assert.match(statements[3].sql, /DELETE FROM observations_hourly/);
   assert.equal(statements[0].args[0], Math.floor(NOW_MS / 1000) - 14 * 86400);
+
+  statements.length = 0;
+  await worker.scheduled({ cron: "*/15 * * * *" }, env, {
+    waitUntil(promise) { scheduledPromise = promise; },
+  });
+  await scheduledPromise;
+  assert.equal(statements.length, 0, "le cron d'archivage ne doit pas lancer la purge quotidienne");
 
   let disabledCalled = false;
   await worker.scheduled({}, { DATA_RETENTION_ENABLED: "false", WAVE_ARCHIVE_ENABLED: "false" }, {

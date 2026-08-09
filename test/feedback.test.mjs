@@ -43,6 +43,29 @@ async function signedRequest(state, source = "bg_check") {
   });
 }
 
+async function signedBatchRequest(items) {
+  const timestamp = Math.floor(Date.now() / 1000);
+  const body = JSON.stringify({ items });
+  const key = await crypto.subtle.importKey(
+    "raw", new TextEncoder().encode(SECRET),
+    { name: "HMAC", hash: "SHA-256" }, false, ["sign"],
+  );
+  const signature = await crypto.subtle.sign("HMAC", key, new TextEncoder().encode(body + timestamp));
+  const signatureHex = Array.from(new Uint8Array(signature))
+    .map((byte) => byte.toString(16).padStart(2, "0")).join("");
+  return new Request("https://api.test/api/extension/feedback/batch", {
+    method: "POST",
+    headers: {
+      "X-Instance-Id": INSTANCE_ID,
+      "X-Auth-Version": "2",
+      "X-Credential-Id": CREDENTIAL_ID,
+      "X-Ts": String(timestamp),
+      "X-Sig": signatureHex,
+    },
+    body,
+  });
+}
+
 function makeEnv() {
   const batches = [];
   const env = {
@@ -101,5 +124,14 @@ assert.match(important.batches[0][1].sql, /INSERT INTO extension_feedback/);
 const autoRequest = makeEnv();
 await worker.fetch(await signedRequest("already_requested", "auto_request"), autoRequest.env, {});
 assert.equal(autoRequest.batches[0].length, 2);
+
+const grouped = makeEnv();
+const groupedResponse = await worker.fetch(await signedBatchRequest([
+  { asin: "B0TEST0001", marketplace: "amazon.fr", state: "not_invitation", source: "bg_check" },
+  { asin: "B0TEST0002", marketplace: "amazon.fr", state: "accepted", source: "bg_check" },
+]), grouped.env, {});
+assert.equal(groupedResponse.status, 200);
+assert.equal((await groupedResponse.json()).accepted, 2);
+assert.equal(grouped.batches[0].length, 3, "deux agrégats horaires et un événement accepté brut");
 
 console.log("feedback: déduplication horaire et brut sélectif validés");
