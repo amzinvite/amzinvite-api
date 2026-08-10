@@ -164,6 +164,9 @@ export default {
       if (url.pathname === "/api/admin/upsert" && request.method === "POST") {
         return await handleAdminUpsert(request, env);
       }
+      if (url.pathname === "/api/admin/invitations" && request.method === "GET") {
+        return await handleAdminInvitations(request, env);
+      }
       if (url.pathname === "/api/admin/sync" && request.method === "GET") {
         return await handleAdminSync(request, env);
       }
@@ -610,6 +613,23 @@ async function handlePublicFeed(request, env) {
   });
 }
 
+async function handleAdminInvitations(request, env) {
+  const token = request.headers.get("X-Admin-Token") || "";
+  if (!token || !constantTimeEqual(token, env.ADMIN_TOKEN || "")) {
+    return json({ error: "unauthorized" }, 401);
+  }
+  const url = new URL(request.url);
+  const marketplace = normalizeMarketplace(url.searchParams.get("marketplace") || "amazon.fr");
+  if (!marketplace) return json({ error: "bad_marketplace" }, 400);
+  const result = await env.DB.prepare(
+    `SELECT asin, url, name, marketplace, first_seen, is_mirror
+       FROM invitations
+      WHERE active = 1 AND marketplace = ?1
+      ORDER BY first_seen DESC`,
+  ).bind(marketplace).all();
+  return json(result.results || [], 200, { "Cache-Control": "private, no-store" });
+}
+
 async function handleExtensionBootstrap(request, env, ctx) {
   const auth = await checkFeedAuth(request, env, BOOTSTRAP_PATH);
   if (!auth.ok) return json({ error: auth.error }, 401);
@@ -1054,8 +1074,8 @@ async function handleAdminUpsert(request, env) {
     inv.active === false ? 0 : 1,
     inv.is_mirror === true ? 1 : 0,
   ));
-  if (stmts.length) {
-    await env.DB.batch(stmts);
+  for (let offset = 0; offset < stmts.length; offset += 100) {
+    await env.DB.batch(stmts.slice(offset, offset + 100));
   }
 
   for (const marketplace of scopes) {
@@ -1086,7 +1106,9 @@ async function handleAdminUpsert(request, env) {
     now,
     item.active === false ? 0 : 1,
   ));
-  if (monitoringStatements.length) await env.DB.batch(monitoringStatements);
+  for (let offset = 0; offset < monitoringStatements.length; offset += 100) {
+    await env.DB.batch(monitoringStatements.slice(offset, offset + 100));
+  }
 
   if (hasMonitoringSnapshot) {
     for (const marketplace of monitoringScopes) {

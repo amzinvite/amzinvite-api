@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import worker from "../src/index.js";
 
 let batchStatements = [];
+let batchCallSizes = [];
 let runStatements = [];
 const env = {
   ADMIN_TOKEN: "upsert-test-token",
@@ -13,10 +14,12 @@ const env = {
         args: [],
         bind(...args) { this.args = args; return this; },
         async run() { runStatements.push(this); return { success: true }; },
+        async all() { return { results: [{ asin: "B0TEST0001", marketplace: "amazon.fr" }] }; },
       };
     },
     async batch(statements) {
       batchStatements = statements;
+      batchCallSizes.push(statements.length);
       return statements.map(() => ({ success: true }));
     },
   },
@@ -102,6 +105,7 @@ const largeResponse = await worker.fetch(new Request("https://api.test/api/admin
   }),
 }), env, {});
 assert.equal(largeResponse.status, 200);
+assert.deepEqual(batchCallSizes.slice(-16), [...Array(15).fill(100), 1]);
 assert.equal(runStatements.at(-1).args.length, 3);
 assert.match(runStatements.at(-1).sql, /json_each\(\?\)/);
 assert.equal(JSON.parse(runStatements.at(-1).args[2]).length, 1_501);
@@ -134,4 +138,12 @@ const invalidDomain = await worker.fetch(new Request("https://api.test/api/admin
 }), env, {});
 assert.equal(invalidDomain.status, 400);
 
-console.log("admin upsert : coexistence FR/BE, monitoring isolé et domaine strict");
+const adminInvitations = await worker.fetch(new Request("https://api.test/api/admin/invitations?marketplace=amazon.fr", {
+  headers: { "X-Admin-Token": "upsert-test-token" },
+}), env, {});
+assert.equal(adminInvitations.status, 200);
+assert.equal((await adminInvitations.json()).length, 1);
+const refusedAdminInvitations = await worker.fetch(new Request("https://api.test/api/admin/invitations"), env, {});
+assert.equal(refusedAdminInvitations.status, 401);
+
+console.log("admin upsert : coexistence FR/BE, monitoring isolé, domaine strict et lecture admin");
