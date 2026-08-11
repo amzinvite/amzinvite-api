@@ -25,6 +25,7 @@ function makeEnv() {
         }
         assert.match(sql, /configured_bounds/);
         assert.doesNotMatch(sql, /accepted_runs/);
+        assert.match(sql, /a\.accepted_at >= b\.started_at - 900/);
         assert.match(sql, /a\.accepted_at < b\.ended_at \+ 10800/);
         assert.match(sql, /MIN\(e\.accepted_at\) \+ 86400 AS ended_at/);
         assert.match(sql, /MIN\(e\.accepted_at\) AS detected_at/);
@@ -69,7 +70,7 @@ try {
     Date.parse("2026-07-24T10:00:00Z") / 1000,
   );
   assert.ok(fridaySlots.some((slot) => slot.started_at === Date.parse("2026-08-07T08:00:00Z") / 1000));
-  assert.ok(fridaySlots.some((slot) => slot.started_at === Date.parse("2026-08-03T18:00:00Z") / 1000));
+  assert.ok(fridaySlots.some((slot) => slot.started_at === Date.parse("2026-08-03T20:00:00Z") / 1000));
 
   globalThis.caches = undefined;
   const response = await worker.fetch(new Request("https://api.test/api/public/waves"), makeEnv(), {});

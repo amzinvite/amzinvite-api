@@ -61,7 +61,7 @@ const DEFAULT_RETENTION_DAYS = 14;
 const PUBLIC_WAVES_CACHE_TTL_SEC = 5 * 60;
 const PARIS_TIME_ZONE = "Europe/Paris";
 const CANONICAL_WAVE_SLOTS = Object.freeze([
-  { weekday: 1, hour: 20, minute: 0 },
+  { weekday: 1, hour: 22, minute: 0 },
   { weekday: 5, hour: 10, minute: 0 },
 ]);
 
@@ -203,7 +203,7 @@ export default {
 // ─────────────────────────────────────────────────────────────────────────
 async function handlePublicWaves(env, ctx) {
   const cache = globalThis.caches?.default;
-  const cacheKey = new Request("https://waves-cache.amzinvite.internal/v9");
+  const cacheKey = new Request("https://waves-cache.amzinvite.internal/v10");
   const cached = cache ? await cache.match(cacheKey) : null;
   if (cached) {
     const cachedPayload = await cached.json();
@@ -236,7 +236,7 @@ async function handlePublicWaves(env, ctx) {
        SELECT b.wave_id, a.instance_id, a.marketplace, a.asin, a.accepted_at
          FROM configured_bounds b
          JOIN acceptance_events a
-           ON a.accepted_at >= b.started_at AND a.accepted_at < b.ended_at + 10800
+           ON a.accepted_at >= b.started_at - 900 AND a.accepted_at < b.ended_at + 10800
      ), wave_bounds AS (
        SELECT b.wave_id, b.started_at, MIN(e.accepted_at) + 86400 AS ended_at
          FROM configured_bounds b
@@ -683,7 +683,7 @@ async function handleExtensionBootstrap(request, env, ctx) {
     feed_revision: feedRevision,
     invitations,
     schedule: {
-      version: "2026-08-11.1",
+      version: "2026-08-11.2",
       timezone: PARIS_TIME_ZONE,
       waves: upcomingWaveSlots(now),
       // Les checks démarrent uniquement après le début de la vague et couvrent
