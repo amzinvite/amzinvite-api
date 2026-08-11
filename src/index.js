@@ -65,6 +65,13 @@ const CANONICAL_WAVE_SLOTS = Object.freeze([
   { weekday: 5, hour: 10, minute: 0 },
 ]);
 
+function publicWavesCacheControl(payload) {
+  const hasLiveWave = Array.isArray(payload?.waves) && payload.waves.some((wave) => !wave.finalized);
+  return hasLiveWave
+    ? "public, max-age=30, s-maxage=60, stale-while-revalidate=60"
+    : `public, max-age=300, s-maxage=${PUBLIC_WAVES_CACHE_TTL_SEC}, stale-while-revalidate=3600`;
+}
+
 function parisParts(date) {
   const parts = new Intl.DateTimeFormat("fr-FR", {
     timeZone: PARIS_TIME_ZONE,
@@ -196,11 +203,12 @@ export default {
 // ─────────────────────────────────────────────────────────────────────────
 async function handlePublicWaves(env, ctx) {
   const cache = globalThis.caches?.default;
-  const cacheKey = new Request("https://waves-cache.amzinvite.internal/v8");
+  const cacheKey = new Request("https://waves-cache.amzinvite.internal/v9");
   const cached = cache ? await cache.match(cacheKey) : null;
   if (cached) {
-    return json(await cached.json(), 200, {
-      "Cache-Control": `public, max-age=300, s-maxage=${PUBLIC_WAVES_CACHE_TTL_SEC}, stale-while-revalidate=86400`,
+    const cachedPayload = await cached.json();
+    return json(cachedPayload, 200, {
+      "Cache-Control": publicWavesCacheControl(cachedPayload),
       "X-Amzinvite-Cache": "HIT",
     });
   }
@@ -228,15 +236,15 @@ async function handlePublicWaves(env, ctx) {
        SELECT b.wave_id, a.instance_id, a.marketplace, a.asin, a.accepted_at
          FROM configured_bounds b
          JOIN acceptance_events a
-           ON a.accepted_at >= b.started_at AND a.accepted_at < b.ended_at
+           ON a.accepted_at >= b.started_at AND a.accepted_at < b.ended_at + 10800
      ), wave_bounds AS (
-       SELECT b.wave_id, b.started_at, b.ended_at
+       SELECT b.wave_id, b.started_at, MIN(e.accepted_at) + 86400 AS ended_at
          FROM configured_bounds b
          JOIN wave_events e ON e.wave_id = b.wave_id
-        GROUP BY b.wave_id, b.started_at, b.ended_at
+        GROUP BY b.wave_id, b.started_at
        HAVING COUNT(DISTINCT e.instance_id) >= 2
      ), wave_summary AS (
-       SELECT b.wave_id, b.started_at, b.ended_at,
+       SELECT b.wave_id, b.started_at, b.ended_at, MIN(e.accepted_at) AS detected_at,
               COUNT(DISTINCT e.instance_id) AS selected_users,
               COUNT(*) AS validations,
               COUNT(DISTINCT e.asin) AS products
@@ -289,7 +297,7 @@ async function handlePublicWaves(env, ctx) {
          )
         WHERE rn = 1
      )
-     SELECT s.wave_id, s.started_at, s.ended_at, s.selected_users,
+     SELECT s.wave_id, s.started_at, s.ended_at, s.detected_at, s.selected_users,
             s.validations, s.products, a.active_users, n.installations,
             p.marketplace, p.asin, p.name,
             p.selected_users AS product_selected_users,
@@ -317,6 +325,7 @@ async function handlePublicWaves(env, ctx) {
       wave = {
         id,
         started_at: Number(row.started_at),
+        detected_at: Number(row.detected_at || row.started_at),
         ended_at: Number(row.ended_at),
         finalized: Number(row.ended_at) <= now,
         installations: Number(row.installations || 0),
@@ -344,7 +353,7 @@ async function handlePublicWaves(env, ctx) {
   }
 
   const archived = await env.DB.prepare(
-    `SELECT w.id, w.started_at, w.ended_at, w.installations, w.active_users,
+    `SELECT w.id, w.started_at, w.detected_at, w.ended_at, w.installations, w.active_users,
             w.selected_users, w.validations, w.products, w.selection_rate,
             p.marketplace, p.asin, p.name, p.image_url,
             p.selected_users AS product_selected_users,
@@ -362,6 +371,7 @@ async function handlePublicWaves(env, ctx) {
       wave = {
         id,
         started_at: Number(row.started_at),
+        detected_at: Number(row.detected_at || row.started_at),
         ended_at: Number(row.ended_at),
         finalized: true,
         installations: Number(row.installations || 0),
@@ -399,7 +409,7 @@ async function handlePublicWaves(env, ctx) {
     waves: Array.from(wavesById.values()).sort((a, b) => b.started_at - a.started_at),
   };
   const responseHeaders = {
-    "Cache-Control": `public, max-age=300, s-maxage=${PUBLIC_WAVES_CACHE_TTL_SEC}, stale-while-revalidate=86400`,
+    "Cache-Control": publicWavesCacheControl(payload),
     "X-Amzinvite-Cache": "MISS",
   };
   if (cache) {
@@ -463,12 +473,12 @@ async function persistFinalizedWaves(env, waves) {
     const statements = [
       env.DB.prepare(
         `INSERT INTO invitation_waves
-           (id, started_at, ended_at, finalized_at, installations, active_users,
+           (id, started_at, detected_at, ended_at, finalized_at, installations, active_users,
             selected_users, validations, products, selection_rate)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
          ON CONFLICT(id) DO NOTHING`,
       ).bind(
-        wave.id, wave.started_at, wave.ended_at, finalizedAt,
+        wave.id, wave.started_at, wave.detected_at || wave.started_at, wave.ended_at, finalizedAt,
         wave.installations, wave.active_users, wave.selected_users,
         wave.validations, wave.products, wave.selection_rate,
       ),
@@ -673,13 +683,13 @@ async function handleExtensionBootstrap(request, env, ctx) {
     feed_revision: feedRevision,
     invitations,
     schedule: {
-      version: "2026-08-09.1",
+      version: "2026-08-11.1",
       timezone: PARIS_TIME_ZONE,
       waves: upcomingWaveSlots(now),
       // Les checks démarrent uniquement après le début de la vague et couvrent
       // toute sa fenêtre de 24 h afin d'alimenter le rapport final.
-      scan_offsets_minutes: [5, 35, 90, 180, 360, 720, 1380],
-      jitter_minutes: 12,
+      scan_offsets_minutes: [5, 20, 35, 50, 65, 80, 95, 110, 125, 150, 180, 360, 720, 1380],
+      jitter_minutes: 4,
       sync_interval_minutes: 360,
       custom_interval_minutes: 360,
     },

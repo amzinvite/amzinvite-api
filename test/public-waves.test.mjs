@@ -12,7 +12,7 @@ function makeEnv() {
           return {
             async all() {
               return { results: [{
-                id: "1785000000", started_at: 1785000000, ended_at: 1785086400,
+                id: "1785000000", started_at: 1785000000, detected_at: 1785000123, ended_at: 1785086400,
                 selected_users: 12, validations: 14, products: 1,
                 active_users: 200, installations: 1100, selection_rate: 0.06,
                 marketplace: "amazon.fr", asin: "B0ARCHIVE1",
@@ -25,6 +25,9 @@ function makeEnv() {
         }
         assert.match(sql, /configured_bounds/);
         assert.doesNotMatch(sql, /accepted_runs/);
+        assert.match(sql, /a\.accepted_at < b\.ended_at \+ 10800/);
+        assert.match(sql, /MIN\(e\.accepted_at\) \+ 86400 AS ended_at/);
+        assert.match(sql, /MIN\(e\.accepted_at\) AS detected_at/);
         assert.match(sql, /c\.last_used_at - c\.created_at > 3600/);
         return {
           bind(cutoff, slots) {
@@ -35,7 +38,7 @@ function makeEnv() {
           async all() {
             return { results: [
               {
-                wave_id: 1, started_at: 1785790156, ended_at: 1785876556,
+                wave_id: 1, started_at: 1785790156, detected_at: 1785790716, ended_at: 1785876556,
                 selected_users: 43, validations: 48, products: 2,
                 active_users: 396, installations: 1267,
                 marketplace: "amazon.fr", asin: "B0GZLFCR67",
@@ -44,7 +47,7 @@ function makeEnv() {
                 image_url: "https://m.media-amazon.com/images/I/tripack.jpg",
               },
               {
-                wave_id: 1, started_at: 1785790156, ended_at: 1785876556,
+                wave_id: 1, started_at: 1785790156, detected_at: 1785790716, ended_at: 1785876556,
                 selected_users: 43, validations: 48, products: 2,
                 active_users: 396, installations: 1267,
                 marketplace: "amazon.fr", asin: "B0H294B5WK",
@@ -75,6 +78,7 @@ try {
   const payload = await response.json();
   assert.equal(payload.waves.length, 2);
   assert.equal(payload.waves[0].active_users, 396);
+  assert.equal(payload.waves[0].detected_at, 1785790716);
   assert.match(payload.methodology, /installation durable/);
   assert.equal(payload.waves[0].items.length, 2);
   assert.equal(payload.waves[0].items[0].selection_rate, 10 / 120);
@@ -95,6 +99,7 @@ try {
     DB: { prepare() { reads += 1; } },
   }, {});
   assert.equal(cached.headers.get("X-Amzinvite-Cache"), "HIT");
+  assert.match(cached.headers.get("Cache-Control"), /s-maxage=300/);
   assert.equal(reads, 0);
 
   console.log("public waves: 2 passés, 0 échoué");

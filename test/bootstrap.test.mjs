@@ -69,7 +69,8 @@ try {
   assert.equal(payload.schema_version, 1);
   assert.equal(payload.invitations.length, 1);
   assert.equal(payload.latest_finalized_wave.id, "wave-final");
-  assert.deepEqual(payload.schedule.scan_offsets_minutes, [5, 35, 90, 180, 360, 720, 1380]);
+  assert.deepEqual(payload.schedule.scan_offsets_minutes, [5, 20, 35, 50, 65, 80, 95, 110, 125, 150, 180, 360, 720, 1380]);
+  assert.equal(payload.schedule.jitter_minutes, 4);
   assert.ok(payload.schedule.waves.length >= 2);
   console.log("bootstrap : feed, calendrier intelligent et dernière vague finalisée");
 } finally {

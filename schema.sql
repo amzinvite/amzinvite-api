@@ -68,6 +68,7 @@ CREATE TABLE IF NOT EXISTS feedback_hourly (
 CREATE TABLE IF NOT EXISTS invitation_waves (
   id TEXT PRIMARY KEY,
   started_at INTEGER NOT NULL UNIQUE,
+  detected_at INTEGER NOT NULL,
   ended_at INTEGER NOT NULL,
   finalized_at INTEGER NOT NULL,
   installations INTEGER NOT NULL,
