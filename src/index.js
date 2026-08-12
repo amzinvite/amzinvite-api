@@ -59,6 +59,7 @@ const ADMIN_STATS_CACHE_TTL_SEC = 30 * 60;
 const RAW_FEEDBACK_STATES = new Set(["available", "accepted"]);
 const DEFAULT_RETENTION_DAYS = 14;
 const PUBLIC_WAVES_CACHE_TTL_SEC = 5 * 60;
+const PUBLIC_WAVES_CACHE_URL = "https://waves-cache.amzinvite.internal/v11";
 const PARIS_TIME_ZONE = "Europe/Paris";
 const CANONICAL_WAVE_SLOTS = Object.freeze([
   { weekday: 1, hour: 22, minute: 0 },
@@ -201,10 +202,10 @@ export default {
 // couvre les 24 h suivantes. Toute la fenêtre est renvoyée en une réponse pour
 // que le sélecteur côté PrixTCG ne déclenche aucun nouvel appel réseau.
 // ─────────────────────────────────────────────────────────────────────────
-async function handlePublicWaves(env, ctx) {
+async function handlePublicWaves(env, ctx, { bypassCache = false } = {}) {
   const cache = globalThis.caches?.default;
-  const cacheKey = new Request("https://waves-cache.amzinvite.internal/v10");
-  const cached = cache ? await cache.match(cacheKey) : null;
+  const cacheKey = new Request(PUBLIC_WAVES_CACHE_URL);
+  const cached = cache && !bypassCache ? await cache.match(cacheKey) : null;
   if (cached) {
     const cachedPayload = await cached.json();
     return json(cachedPayload, 200, {
@@ -327,7 +328,9 @@ async function handlePublicWaves(env, ctx) {
         started_at: Number(row.started_at),
         detected_at: Number(row.detected_at || row.started_at),
         ended_at: Number(row.ended_at),
-        finalized: Number(row.ended_at) <= now,
+        // Une vague terminée reste dynamique jusqu'à son archivage par le cron.
+        // `finalized` signifie donc désormais « compteurs figés en base ».
+        finalized: false,
         installations: Number(row.installations || 0),
         active_users: activeUsers,
         selected_users: selectedUsers,
@@ -450,10 +453,15 @@ async function runScheduledMaintenance(env, cron = null) {
   const shouldPurge = cron == null || cron === "17 3 * * *";
   if (shouldArchive && env.WAVE_ARCHIVE_ENABLED !== "false") {
     try {
-      const response = await handlePublicWaves(env, {});
+      // Le cron doit relire les compteurs courants, sans reprendre une réponse
+      // publique potentiellement mise en cache juste avant la fin de vague.
+      const response = await handlePublicWaves(env, {}, { bypassCache: true });
       if (response.ok) {
         const payload = await response.json();
-        await persistFinalizedWaves(env, payload.waves || []);
+        const archived = await persistFinalizedWaves(env, payload.waves || []);
+        if (archived > 0) {
+          await globalThis.caches?.default?.delete?.(new Request(PUBLIC_WAVES_CACHE_URL));
+        }
       }
     } catch (error) {
       console.error("wave archive failed", error);
@@ -462,10 +470,11 @@ async function runScheduledMaintenance(env, cron = null) {
   if (shouldPurge && env.DATA_RETENTION_ENABLED !== "false") await purgeExpiredData(env);
 }
 
-async function persistFinalizedWaves(env, waves) {
+export async function persistFinalizedWaves(env, waves) {
   const finalizedAt = Math.floor(Date.now() / 1000);
+  let archived = 0;
   for (const wave of waves) {
-    if (!wave.finalized || Number(wave.ended_at) > finalizedAt) continue;
+    if (Number(wave.ended_at) > finalizedAt) continue;
     const existing = await env.DB.prepare(
       "SELECT 1 FROM invitation_waves WHERE id = ?1 LIMIT 1",
     ).bind(wave.id).first();
@@ -497,7 +506,9 @@ async function persistFinalizedWaves(env, waves) {
         )),
     ];
     await env.DB.batch(statements);
+    archived += 1;
   }
+  return archived;
 }
 
 function safePublicAmazonImage(value) {

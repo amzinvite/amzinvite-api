@@ -75,10 +75,11 @@ try {
   globalThis.caches = undefined;
   const response = await worker.fetch(new Request("https://api.test/api/public/waves"), makeEnv(), {});
   assert.equal(response.status, 200);
-  assert.match(response.headers.get("Cache-Control"), /s-maxage=300/);
+  assert.match(response.headers.get("Cache-Control"), /s-maxage=60/);
   const payload = await response.json();
   assert.equal(payload.waves.length, 2);
   assert.equal(payload.waves[0].active_users, 396);
+  assert.equal(payload.waves[0].finalized, false, "une vague calculée en direct ne doit pas déclencher la notification");
   assert.equal(payload.waves[0].detected_at, 1785790716);
   assert.match(payload.methodology, /installation durable/);
   assert.equal(payload.waves[0].items.length, 2);
@@ -86,6 +87,7 @@ try {
   assert.equal(payload.waves[0].items[0].image_url, "https://m.media-amazon.com/images/I/tripack.jpg");
   assert.equal(payload.waves[0].items[1].image_url, null);
   assert.equal(payload.waves[1].items[0].name, "Produit archivé");
+  assert.equal(payload.waves[1].finalized, true, "seule une vague archivée est figée");
 
   let reads = 0;
   globalThis.caches = {
