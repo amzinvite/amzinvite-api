@@ -34,7 +34,8 @@ la vague.
 
 Une vague publique s'ouvre après un signal `available` ou `accepted` provenant
 de deux installations distinctes. Seuls les événements `accepted` alimentent
-les compteurs de sélection et de validation.
+le nombre de produits affichés ainsi que les compteurs de sélection et de
+validation.
 
 ## Licence
 
