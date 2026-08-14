@@ -275,13 +275,7 @@ async function handlePublicWaves(env, ctx, { bypassCache = false } = {}) {
      ), selection_summary AS (
        SELECT b.wave_id,
               COUNT(DISTINCT a.instance_id) AS selected_users,
-              COUNT(a.instance_id) AS validations
-         FROM wave_bounds b
-         LEFT JOIN acceptance_events a
-           ON a.accepted_at >= b.started_at - 900 AND a.accepted_at < b.ended_at
-        GROUP BY b.wave_id
-     ), selected_product_summary AS (
-       SELECT b.wave_id,
+              COUNT(a.instance_id) AS validations,
               COUNT(DISTINCT CASE WHEN a.instance_id IS NOT NULL
                 THEN p.marketplace || ':' || p.asin END) AS products
          FROM wave_bounds b
@@ -293,12 +287,11 @@ async function handlePublicWaves(env, ctx, { bypassCache = false } = {}) {
      ), wave_summary AS (
        SELECT b.wave_id, b.started_at, b.ended_at, b.detected_at,
               s.selected_users, s.validations,
-              p.products
+              s.products
          FROM wave_bounds b
          JOIN selection_summary s ON s.wave_id = b.wave_id
-         JOIN selected_product_summary p ON p.wave_id = b.wave_id
         GROUP BY b.wave_id, b.started_at, b.ended_at, b.detected_at,
-                 s.selected_users, s.validations, p.products
+                 s.selected_users, s.validations, s.products
      ), wave_activity AS (
        SELECT b.wave_id,
               COUNT(DISTINCT f.instance_id) AS active_users
