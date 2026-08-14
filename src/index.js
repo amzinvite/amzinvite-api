@@ -473,7 +473,7 @@ async function handlePublicWaves(env, ctx, { bypassCache = false } = {}) {
   return json(payload, 200, responseHeaders);
 }
 
-function upcomingWaveSlots(nowEpoch, count = 6) {
+export function upcomingWaveSlots(nowEpoch, count = 6) {
   const now = new Date(Number(nowEpoch) * 1000);
   const current = parisParts(now);
   const parisDayUtc = Date.UTC(current.year, current.month - 1, current.day);
@@ -495,7 +495,7 @@ function upcomingWaveSlots(nowEpoch, count = 6) {
       }
     }
   }
-  return slots.sort((left, right) => left.starts_at - right.starts_at).slice(-count);
+  return slots.sort((left, right) => left.starts_at - right.starts_at).slice(0, count);
 }
 
 async function runScheduledMaintenance(env, cron = null) {
@@ -744,7 +744,7 @@ async function handleExtensionBootstrap(request, env, ctx) {
     feed_revision: feedRevision,
     invitations,
     schedule: {
-      version: "2026-08-14.1",
+      version: "2026-08-14.2",
       timezone: PARIS_TIME_ZONE,
       waves: upcomingWaveSlots(now),
       // Un seul premier scan par installation entre T+0 et T+29. Environ 10 %

@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import worker, { initialWaveScanOffset } from "../src/index.js";
+import worker, { initialWaveScanOffset, upcomingWaveSlots } from "../src/index.js";
 
 const INSTANCE_ID = "01234567-89ab-4def-8123-456789abcdef";
 const CREDENTIAL_ID = "11111111-1111-4111-8111-111111111111";
@@ -11,6 +11,11 @@ const sampleOffsets = Array.from({ length: 1000 }, (_, index) =>
 assert.ok(sampleOffsets.every((offset) => offset >= 0 && offset <= 28));
 const canaryShare = sampleOffsets.filter((offset) => offset <= 1).length / sampleOffsets.length;
 assert.ok(canaryShare >= 0.07 && canaryShare <= 0.13);
+
+const fridayDuringWave = Date.parse("2026-08-14T08:30:00Z") / 1000;
+const fridaySlots = upcomingWaveSlots(fridayDuringWave);
+assert.equal(fridaySlots[0].starts_at, Date.parse("2026-08-14T08:00:00Z") / 1000);
+assert.ok(fridaySlots.some((slot) => slot.starts_at === Date.parse("2026-08-17T20:00:00Z") / 1000));
 
 async function signedRequest() {
   const timestamp = Math.floor(Date.now() / 1000);
@@ -81,7 +86,7 @@ try {
   assert.ok(payload.schedule.scan_offsets_minutes[0] >= 0);
   assert.ok(payload.schedule.scan_offsets_minutes[0] <= 28);
   assert.equal(payload.schedule.jitter_minutes, 1);
-  assert.equal(payload.schedule.version, "2026-08-14.1");
+  assert.equal(payload.schedule.version, "2026-08-14.2");
   assert.ok(payload.schedule.waves.length >= 2);
   console.log("bootstrap : feed, calendrier intelligent et dernière vague finalisée");
 } finally {
