@@ -65,6 +65,24 @@ const CANONICAL_WAVE_SLOTS = Object.freeze([
   { weekday: 1, hour: 22, minute: 0 },
   { weekday: 5, hour: 10, minute: 0 },
 ]);
+const WAVE_CANARY_PERCENT = 10;
+const WAVE_INITIAL_SCAN_LAST_BASE_MINUTE = 28;
+const WAVE_STATS_SCAN_OFFSETS_MINUTES = Object.freeze([60, 180, 360, 720, 1380]);
+
+function stableHash(value) {
+  let hash = 0x811c9dc5;
+  for (let index = 0; index < value.length; index++) {
+    hash ^= value.charCodeAt(index);
+    hash = Math.imul(hash, 0x01000193);
+  }
+  return hash >>> 0;
+}
+
+export function initialWaveScanOffset(instanceId) {
+  const hash = stableHash(String(instanceId || ""));
+  if (hash % 100 < WAVE_CANARY_PERCENT) return hash % 2;
+  return 2 + (hash % (WAVE_INITIAL_SCAN_LAST_BASE_MINUTE - 1));
+}
 
 function publicWavesCacheControl(payload) {
   const hasLiveWave = Array.isArray(payload?.waves) && payload.waves.some((wave) => !wave.finalized);
@@ -219,39 +237,58 @@ async function handlePublicWaves(env, ctx, { bypassCache = false } = {}) {
   const cutoff = now - retentionDays * 86400;
   const waveSlots = canonicalWaveSlots(now, cutoff);
   const result = await env.DB.prepare(
-    `WITH accepted_hours AS (
-       SELECT instance_id, marketplace, asin, hour,
+    `WITH signal_hours AS (
+       SELECT instance_id, marketplace, asin, state, hour,
               COALESCE(first_observed_at, first_received_at) AS observed_at
          FROM feedback_hourly
-        WHERE state = 'accepted' AND hour >= ?1
+        WHERE state IN ('available', 'accepted') AND hour >= ?1
+     ), wave_signals_by_product AS (
+       SELECT instance_id, marketplace, asin, MIN(observed_at) AS signal_at
+         FROM signal_hours
+        GROUP BY instance_id, marketplace, asin
      ), acceptance_events AS (
        SELECT instance_id, marketplace, asin, MIN(observed_at) AS accepted_at
-         FROM accepted_hours
+         FROM signal_hours
+        WHERE state = 'accepted'
         GROUP BY instance_id, marketplace, asin
      ), configured_bounds AS (
        SELECT CAST(json_extract(value, '$.id') AS TEXT) AS wave_id,
               CAST(json_extract(value, '$.started_at') AS INTEGER) AS started_at,
               CAST(json_extract(value, '$.ended_at') AS INTEGER) AS ended_at
          FROM json_each(?2)
-     ), wave_events AS (
-       SELECT b.wave_id, a.instance_id, a.marketplace, a.asin, a.accepted_at
+     ), wave_signals AS (
+       SELECT b.wave_id, s.instance_id, s.marketplace, s.asin, s.signal_at
          FROM configured_bounds b
-         JOIN acceptance_events a
-           ON a.accepted_at >= b.started_at - 900 AND a.accepted_at < b.ended_at + 10800
+         JOIN wave_signals_by_product s
+           ON s.signal_at >= b.started_at - 900 AND s.signal_at < b.ended_at + 10800
      ), wave_bounds AS (
-       SELECT b.wave_id, b.started_at, MIN(e.accepted_at) + 86400 AS ended_at
+       SELECT b.wave_id, b.started_at, MIN(s.signal_at) AS detected_at,
+              MIN(s.signal_at) + 86400 AS ended_at
          FROM configured_bounds b
-         JOIN wave_events e ON e.wave_id = b.wave_id
+         JOIN wave_signals s ON s.wave_id = b.wave_id
         GROUP BY b.wave_id, b.started_at
-       HAVING COUNT(DISTINCT e.instance_id) >= 2
-     ), wave_summary AS (
-       SELECT b.wave_id, b.started_at, b.ended_at, MIN(e.accepted_at) AS detected_at,
-              COUNT(DISTINCT e.instance_id) AS selected_users,
-              COUNT(*) AS validations,
-              COUNT(DISTINCT e.asin) AS products
+       HAVING COUNT(DISTINCT s.instance_id) >= 2
+     ), wave_products AS (
+       SELECT DISTINCT s.wave_id, s.marketplace, s.asin
          FROM wave_bounds b
-         JOIN wave_events e ON e.wave_id = b.wave_id AND e.accepted_at < b.ended_at
-        GROUP BY b.wave_id, b.started_at, b.ended_at
+         JOIN wave_signals s ON s.wave_id = b.wave_id AND s.signal_at < b.ended_at
+     ), selection_summary AS (
+       SELECT b.wave_id,
+              COUNT(DISTINCT a.instance_id) AS selected_users,
+              COUNT(a.instance_id) AS validations
+         FROM wave_bounds b
+         LEFT JOIN acceptance_events a
+           ON a.accepted_at >= b.started_at - 900 AND a.accepted_at < b.ended_at
+        GROUP BY b.wave_id
+     ), wave_summary AS (
+       SELECT b.wave_id, b.started_at, b.ended_at, b.detected_at,
+              s.selected_users, s.validations,
+              COUNT(DISTINCT p.asin) AS products
+         FROM wave_bounds b
+         JOIN selection_summary s ON s.wave_id = b.wave_id
+         JOIN wave_products p ON p.wave_id = b.wave_id
+        GROUP BY b.wave_id, b.started_at, b.ended_at, b.detected_at,
+                 s.selected_users, s.validations
      ), wave_activity AS (
        SELECT b.wave_id,
               COUNT(DISTINCT f.instance_id) AS active_users
@@ -268,15 +305,18 @@ async function handlePublicWaves(env, ctx, { bypassCache = false } = {}) {
           AND c.last_used_at - c.created_at > 3600
         GROUP BY b.wave_id
      ), product_summary AS (
-       SELECT b.wave_id, e.marketplace, e.asin,
-              COALESCE(i.name, m.name, e.asin) AS name,
-              COUNT(DISTINCT e.instance_id) AS selected_users,
-              COUNT(*) AS validations
+       SELECT b.wave_id, p.marketplace, p.asin,
+              COALESCE(i.name, m.name, p.asin) AS name,
+              COUNT(DISTINCT a.instance_id) AS selected_users,
+              COUNT(a.instance_id) AS validations
          FROM wave_bounds b
-         JOIN wave_events e ON e.wave_id = b.wave_id AND e.accepted_at < b.ended_at
-         LEFT JOIN invitations i ON i.marketplace = e.marketplace AND i.asin = e.asin
-         LEFT JOIN monitoring_products m ON m.marketplace = e.marketplace AND m.asin = e.asin
-        GROUP BY b.wave_id, e.marketplace, e.asin, COALESCE(i.name, m.name, e.asin)
+         JOIN wave_products p ON p.wave_id = b.wave_id
+         LEFT JOIN acceptance_events a
+           ON a.marketplace = p.marketplace AND a.asin = p.asin
+          AND a.accepted_at >= b.started_at - 900 AND a.accepted_at < b.ended_at
+         LEFT JOIN invitations i ON i.marketplace = p.marketplace AND i.asin = p.asin
+         LEFT JOIN monitoring_products m ON m.marketplace = p.marketplace AND m.asin = p.asin
+        GROUP BY b.wave_id, p.marketplace, p.asin, COALESCE(i.name, m.name, p.asin)
      ), eligible_summary AS (
        SELECT b.wave_id, f.marketplace, f.asin,
               COUNT(DISTINCT f.instance_id) AS eligible_users
@@ -694,13 +734,18 @@ async function handleExtensionBootstrap(request, env, ctx) {
     feed_revision: feedRevision,
     invitations,
     schedule: {
-      version: "2026-08-11.2",
+      version: "2026-08-14.1",
       timezone: PARIS_TIME_ZONE,
       waves: upcomingWaveSlots(now),
-      // Les checks démarrent uniquement après le début de la vague et couvrent
-      // toute sa fenêtre de 24 h afin d'alimenter le rapport final.
-      scan_offsets_minutes: [5, 20, 35, 50, 65, 80, 95, 110, 125, 150, 180, 360, 720, 1380],
-      jitter_minutes: 4,
+      // Un seul premier scan par installation entre T+0 et T+29. Environ 10 %
+      // des installations servent de canaris pendant les deux premières minutes;
+      // les autres sont réparties de façon stable jusqu'à T+29. Les scans plus
+      // espacés alimentent ensuite les statistiques sur les 24 h de la vague.
+      scan_offsets_minutes: [
+        initialWaveScanOffset(instanceId),
+        ...WAVE_STATS_SCAN_OFFSETS_MINUTES,
+      ],
+      jitter_minutes: 1,
       sync_interval_minutes: 360,
       custom_interval_minutes: 360,
     },

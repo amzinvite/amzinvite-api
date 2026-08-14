@@ -1,10 +1,16 @@
 import assert from "node:assert/strict";
-import worker from "../src/index.js";
+import worker, { initialWaveScanOffset } from "../src/index.js";
 
 const INSTANCE_ID = "01234567-89ab-4def-8123-456789abcdef";
 const CREDENTIAL_ID = "11111111-1111-4111-8111-111111111111";
 const SECRET = "bootstrap-v2-secret";
 const PATH = "/api/extension/bootstrap?marketplaces=amazon.fr";
+
+const sampleOffsets = Array.from({ length: 1000 }, (_, index) =>
+  initialWaveScanOffset(`installation-${String(index).padStart(4, "0")}`));
+assert.ok(sampleOffsets.every((offset) => offset >= 0 && offset <= 28));
+const canaryShare = sampleOffsets.filter((offset) => offset <= 1).length / sampleOffsets.length;
+assert.ok(canaryShare >= 0.07 && canaryShare <= 0.13);
 
 async function signedRequest() {
   const timestamp = Math.floor(Date.now() / 1000);
@@ -69,8 +75,13 @@ try {
   assert.equal(payload.schema_version, 1);
   assert.equal(payload.invitations.length, 1);
   assert.equal(payload.latest_finalized_wave.id, "wave-final");
-  assert.deepEqual(payload.schedule.scan_offsets_minutes, [5, 20, 35, 50, 65, 80, 95, 110, 125, 150, 180, 360, 720, 1380]);
-  assert.equal(payload.schedule.jitter_minutes, 4);
+  assert.deepEqual(payload.schedule.scan_offsets_minutes, [
+    initialWaveScanOffset(INSTANCE_ID), 60, 180, 360, 720, 1380,
+  ]);
+  assert.ok(payload.schedule.scan_offsets_minutes[0] >= 0);
+  assert.ok(payload.schedule.scan_offsets_minutes[0] <= 28);
+  assert.equal(payload.schedule.jitter_minutes, 1);
+  assert.equal(payload.schedule.version, "2026-08-14.1");
   assert.ok(payload.schedule.waves.length >= 2);
   console.log("bootstrap : feed, calendrier intelligent et dernière vague finalisée");
 } finally {

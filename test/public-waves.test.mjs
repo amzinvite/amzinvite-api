@@ -25,10 +25,13 @@ function makeEnv() {
         }
         assert.match(sql, /configured_bounds/);
         assert.doesNotMatch(sql, /accepted_runs/);
-        assert.match(sql, /a\.accepted_at >= b\.started_at - 900/);
-        assert.match(sql, /a\.accepted_at < b\.ended_at \+ 10800/);
-        assert.match(sql, /MIN\(e\.accepted_at\) \+ 86400 AS ended_at/);
-        assert.match(sql, /MIN\(e\.accepted_at\) AS detected_at/);
+        assert.match(sql, /state IN \('available', 'accepted'\)/);
+        assert.match(sql, /s\.signal_at >= b\.started_at - 900/);
+        assert.match(sql, /s\.signal_at < b\.ended_at \+ 10800/);
+        assert.match(sql, /MIN\(s\.signal_at\) \+ 86400 AS ended_at/);
+        assert.match(sql, /MIN\(s\.signal_at\) AS detected_at/);
+        assert.match(sql, /HAVING COUNT\(DISTINCT s\.instance_id\) >= 2/);
+        assert.match(sql, /LEFT JOIN acceptance_events/);
         assert.match(sql, /c\.last_used_at - c\.created_at > 3600/);
         return {
           bind(cutoff, slots) {
