@@ -32,7 +32,9 @@ function makeEnv() {
         assert.match(sql, /MIN\(s\.signal_at\) AS detected_at/);
         assert.match(sql, /HAVING COUNT\(DISTINCT s\.instance_id\) >= 2/);
         assert.match(sql, /LEFT JOIN acceptance_events/);
-        assert.match(sql, /COUNT\(DISTINCT a\.asin\) AS products/);
+        assert.match(sql, /selected_product_summary/);
+        assert.match(sql, /CASE WHEN a\.instance_id IS NOT NULL/);
+        assert.match(sql, /a\.marketplace = p\.marketplace AND a\.asin = p\.asin/);
         assert.doesNotMatch(sql, /COUNT\(DISTINCT p\.asin\) AS products/);
         assert.match(sql, /c\.last_used_at - c\.created_at > 3600/);
         return {
