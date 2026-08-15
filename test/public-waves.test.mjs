@@ -28,7 +28,7 @@ function makeEnv() {
         assert.match(sql, /state IN \('available', 'accepted'\)/);
         assert.match(sql, /s\.signal_at >= b\.started_at - 900/);
         assert.match(sql, /s\.signal_at < b\.ended_at \+ 10800/);
-        assert.match(sql, /b\.started_at \+ 86400 AS ended_at/);
+        assert.match(sql, /b\.ended_at/);
         assert.match(sql, /MIN\(s\.signal_at\) AS detected_at/);
         assert.match(sql, /HAVING COUNT\(DISTINCT s\.instance_id\) >= 2/);
         assert.match(sql, /LEFT JOIN acceptance_events/);
@@ -78,6 +78,12 @@ try {
   );
   assert.ok(fridaySlots.some((slot) => slot.started_at === Date.parse("2026-08-07T08:00:00Z") / 1000));
   assert.ok(fridaySlots.some((slot) => slot.started_at === Date.parse("2026-08-03T20:00:00Z") / 1000));
+
+  const extendedWave = canonicalWaveSlots(
+    Date.parse("2026-08-15T10:00:00Z") / 1000,
+    Date.parse("2026-08-14T00:00:00Z") / 1000,
+  ).find((slot) => slot.started_at === Date.parse("2026-08-14T08:00:00Z") / 1000);
+  assert.equal(extendedWave.ended_at, Date.parse("2026-08-15T16:00:00Z") / 1000);
 
   globalThis.caches = undefined;
   const response = await worker.fetch(new Request("https://api.test/api/public/waves"), makeEnv(), {});

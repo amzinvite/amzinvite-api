@@ -59,11 +59,16 @@ const ADMIN_STATS_CACHE_TTL_SEC = 30 * 60;
 const RAW_FEEDBACK_STATES = new Set(["available", "accepted"]);
 const DEFAULT_RETENTION_DAYS = 14;
 const PUBLIC_WAVES_CACHE_TTL_SEC = 5 * 60;
-const PUBLIC_WAVES_CACHE_URL = "https://waves-cache.amzinvite.internal/v14";
+const PUBLIC_WAVES_CACHE_URL = "https://waves-cache.amzinvite.internal/v15";
 const PARIS_TIME_ZONE = "Europe/Paris";
 const CANONICAL_WAVE_SLOTS = Object.freeze([
   { weekday: 1, hour: 22, minute: 0 },
   { weekday: 5, hour: 10, minute: 0 },
+]);
+// Exception éditoriale unique : laisser la vague du 14 août 2026 collecter
+// jusqu'à 18 h le lendemain. Les vagues suivantes restent à T+24 h.
+const WAVE_END_OVERRIDES = new Map([
+  [1786694400, 1786809600],
 ]);
 const WAVE_CANARY_PERCENT = 10;
 const WAVE_INITIAL_SCAN_LAST_BASE_MINUTE = 28;
@@ -119,6 +124,10 @@ function parisDateTimeToEpoch(year, month, day, hour, minute) {
   return Math.round((wallClockUtc - correctedOffset) / 1000);
 }
 
+function waveEndAt(startedAt) {
+  return WAVE_END_OVERRIDES.get(startedAt) || startedAt + 86400;
+}
+
 export function canonicalWaveSlots(nowEpoch, cutoffEpoch) {
   const now = new Date(Number(nowEpoch) * 1000);
   const current = parisParts(now);
@@ -132,8 +141,9 @@ export function canonicalWaveSlots(nowEpoch, cutoffEpoch) {
         day.getUTCFullYear(), day.getUTCMonth() + 1, day.getUTCDate(),
         slot.hour, slot.minute,
       );
-      if (startedAt <= nowEpoch && startedAt + 86400 >= cutoffEpoch) {
-        slots.push({ id: String(startedAt), started_at: startedAt, ended_at: startedAt + 86400 });
+      const endedAt = waveEndAt(startedAt);
+      if (startedAt <= nowEpoch && endedAt >= cutoffEpoch) {
+        slots.push({ id: String(startedAt), started_at: startedAt, ended_at: endedAt });
       }
     }
   }
@@ -263,10 +273,10 @@ async function handlePublicWaves(env, ctx, { bypassCache = false } = {}) {
            ON s.signal_at >= b.started_at - 900 AND s.signal_at < b.ended_at + 10800
      ), wave_bounds AS (
        SELECT b.wave_id, b.started_at, MIN(s.signal_at) AS detected_at,
-              b.started_at + 86400 AS ended_at
+              b.ended_at
          FROM configured_bounds b
          JOIN wave_signals s ON s.wave_id = b.wave_id
-        GROUP BY b.wave_id, b.started_at
+        GROUP BY b.wave_id, b.started_at, b.ended_at
        HAVING COUNT(DISTINCT s.instance_id) >= 2
      ), wave_products AS (
        SELECT DISTINCT s.wave_id, s.marketplace, s.asin
@@ -483,7 +493,7 @@ export function upcomingWaveSlots(nowEpoch, count = 6) {
         slots.push({
           id: String(startedAt),
           starts_at: startedAt,
-          ends_at: startedAt + 86400,
+          ends_at: waveEndAt(startedAt),
         });
       }
     }
@@ -737,7 +747,7 @@ async function handleExtensionBootstrap(request, env, ctx) {
     feed_revision: feedRevision,
     invitations,
     schedule: {
-      version: "2026-08-14.2",
+      version: "2026-08-15.1",
       timezone: PARIS_TIME_ZONE,
       waves: upcomingWaveSlots(now),
       // Un seul premier scan par installation entre T+0 et T+29. Environ 10 %

@@ -15,6 +15,7 @@ assert.ok(canaryShare >= 0.07 && canaryShare <= 0.13);
 const fridayDuringWave = Date.parse("2026-08-14T08:30:00Z") / 1000;
 const fridaySlots = upcomingWaveSlots(fridayDuringWave);
 assert.equal(fridaySlots[0].starts_at, Date.parse("2026-08-14T08:00:00Z") / 1000);
+assert.equal(fridaySlots[0].ends_at, Date.parse("2026-08-15T16:00:00Z") / 1000);
 assert.ok(fridaySlots.some((slot) => slot.starts_at === Date.parse("2026-08-17T20:00:00Z") / 1000));
 
 async function signedRequest() {
@@ -86,7 +87,7 @@ try {
   assert.ok(payload.schedule.scan_offsets_minutes[0] >= 0);
   assert.ok(payload.schedule.scan_offsets_minutes[0] <= 28);
   assert.equal(payload.schedule.jitter_minutes, 1);
-  assert.equal(payload.schedule.version, "2026-08-14.2");
+  assert.equal(payload.schedule.version, "2026-08-15.1");
   assert.ok(payload.schedule.waves.length >= 2);
   console.log("bootstrap : feed, calendrier intelligent et dernière vague finalisée");
 } finally {
