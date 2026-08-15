@@ -263,7 +263,7 @@ async function handlePublicWaves(env, ctx, { bypassCache = false } = {}) {
            ON s.signal_at >= b.started_at - 900 AND s.signal_at < b.ended_at + 10800
      ), wave_bounds AS (
        SELECT b.wave_id, b.started_at, MIN(s.signal_at) AS detected_at,
-              MIN(s.signal_at) + 86400 AS ended_at
+              MIN(s.signal_at) + 14400 AS ended_at
          FROM configured_bounds b
          JOIN wave_signals s ON s.wave_id = b.wave_id
         GROUP BY b.wave_id, b.started_at
