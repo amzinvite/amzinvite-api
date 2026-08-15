@@ -81,7 +81,7 @@ try {
   assert.equal(payload.invitations.length, 1);
   assert.equal(payload.latest_finalized_wave.id, "wave-final");
   assert.deepEqual(payload.schedule.scan_offsets_minutes, [
-    initialWaveScanOffset(INSTANCE_ID), 60, 180, 360, 720, 1380,
+    initialWaveScanOffset(INSTANCE_ID), 60, 180, 360, 720, 1260, 1320, 1380,
   ]);
   assert.ok(payload.schedule.scan_offsets_minutes[0] >= 0);
   assert.ok(payload.schedule.scan_offsets_minutes[0] <= 28);

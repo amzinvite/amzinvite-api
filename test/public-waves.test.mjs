@@ -28,7 +28,7 @@ function makeEnv() {
         assert.match(sql, /state IN \('available', 'accepted'\)/);
         assert.match(sql, /s\.signal_at >= b\.started_at - 900/);
         assert.match(sql, /s\.signal_at < b\.ended_at \+ 10800/);
-        assert.match(sql, /MIN\(s\.signal_at\) \+ 14400 AS ended_at/);
+        assert.match(sql, /b\.started_at \+ 86400 AS ended_at/);
         assert.match(sql, /MIN\(s\.signal_at\) AS detected_at/);
         assert.match(sql, /HAVING COUNT\(DISTINCT s\.instance_id\) >= 2/);
         assert.match(sql, /LEFT JOIN acceptance_events/);

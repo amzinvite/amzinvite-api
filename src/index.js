@@ -59,7 +59,7 @@ const ADMIN_STATS_CACHE_TTL_SEC = 30 * 60;
 const RAW_FEEDBACK_STATES = new Set(["available", "accepted"]);
 const DEFAULT_RETENTION_DAYS = 14;
 const PUBLIC_WAVES_CACHE_TTL_SEC = 5 * 60;
-const PUBLIC_WAVES_CACHE_URL = "https://waves-cache.amzinvite.internal/v13";
+const PUBLIC_WAVES_CACHE_URL = "https://waves-cache.amzinvite.internal/v14";
 const PARIS_TIME_ZONE = "Europe/Paris";
 const CANONICAL_WAVE_SLOTS = Object.freeze([
   { weekday: 1, hour: 22, minute: 0 },
@@ -67,7 +67,7 @@ const CANONICAL_WAVE_SLOTS = Object.freeze([
 ]);
 const WAVE_CANARY_PERCENT = 10;
 const WAVE_INITIAL_SCAN_LAST_BASE_MINUTE = 28;
-const WAVE_STATS_SCAN_OFFSETS_MINUTES = Object.freeze([60, 180, 360, 720, 1380]);
+const WAVE_STATS_SCAN_OFFSETS_MINUTES = Object.freeze([60, 180, 360, 720, 1260, 1320, 1380]);
 
 function stableHash(value) {
   let hash = 0x811c9dc5;
@@ -263,7 +263,7 @@ async function handlePublicWaves(env, ctx, { bypassCache = false } = {}) {
            ON s.signal_at >= b.started_at - 900 AND s.signal_at < b.ended_at + 10800
      ), wave_bounds AS (
        SELECT b.wave_id, b.started_at, MIN(s.signal_at) AS detected_at,
-              MIN(s.signal_at) + 14400 AS ended_at
+              b.started_at + 86400 AS ended_at
          FROM configured_bounds b
          JOIN wave_signals s ON s.wave_id = b.wave_id
         GROUP BY b.wave_id, b.started_at
