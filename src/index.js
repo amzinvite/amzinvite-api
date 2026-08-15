@@ -875,14 +875,17 @@ async function handleFeedbackBatch(request, env) {
   let payload;
   try { payload = JSON.parse(body.text); }
   catch { return json({ error: "bad_json" }, 400); }
-  if (!Array.isArray(payload.items) || payload.items.length === 0) {
-    return json({ error: "empty_items" }, 400);
+  const items = Array.isArray(payload.items) ? payload.items : [];
+  const scanSummary = normalizeScanSummary(payload.scanSummary);
+  if (payload.scanSummary != null && !scanSummary.ok) {
+    return json({ error: scanSummary.error }, 400);
   }
-  if (payload.items.length > MAX_FEEDBACK_BATCH_ITEMS) {
+  if (items.length === 0 && !scanSummary.item) return json({ error: "empty_items" }, 400);
+  if (items.length > MAX_FEEDBACK_BATCH_ITEMS) {
     return json({ error: "too_many_items" }, 400);
   }
   const normalizedItems = [];
-  for (const item of payload.items) {
+  for (const item of items) {
     const normalized = normalizeFeedbackItem(item);
     if (!normalized.ok) return json({ error: normalized.error }, 400);
     normalizedItems.push(normalized.item);
@@ -890,8 +893,9 @@ async function handleFeedbackBatch(request, env) {
   const instanceLimit = await env.FEEDBACK_RATE_LIMITER.limit({ key: instanceId });
   if (!instanceLimit.success) return json({ error: "rate_limit" }, 429);
   const statements = feedbackStatements(env, instanceId, normalizedItems);
+  if (scanSummary.item) statements.push(scanSummaryStatement(env, instanceId, scanSummary.item));
   await env.DB.batch(statements);
-  return json({ ok: true, accepted: normalizedItems.length });
+  return json({ ok: true, accepted: normalizedItems.length, scan_summary: Boolean(scanSummary.item) });
 }
 
 function normalizeFeedbackItem(payload) {
@@ -915,6 +919,79 @@ function normalizeFeedbackItem(payload) {
       observedAt: Number(payload.observedAt) || null,
     },
   };
+}
+
+function normalizeScanSummary(payload) {
+  if (payload == null) return { ok: true, item: null };
+  const runKind = String(payload.runKind || "");
+  const outcome = String(payload.outcome || "");
+  const extensionVersion = String(payload.extensionVersion || "").trim();
+  const checked = Number(payload.checked);
+  const expected = Number(payload.expected);
+  const errors = Number(payload.errors);
+  const startedAt = Number(payload.startedAt);
+  const completedAt = Number(payload.completedAt);
+  const durationMs = Number(payload.durationMs);
+  if (!new Set(["full", "partial"]).has(runKind)) return { ok: false, error: "bad_scan_run_kind" };
+  if (!new Set(["completed", "blocked", "cancelled", "failed"]).has(outcome)) {
+    return { ok: false, error: "bad_scan_outcome" };
+  }
+  if (!/^\d+(?:\.\d+){1,3}$/.test(extensionVersion) || extensionVersion.length > 32) {
+    return { ok: false, error: "bad_extension_version" };
+  }
+  if (![checked, expected, errors].every(Number.isInteger)
+      || expected < 0 || expected > 500 || checked < 0 || checked > expected
+      || errors < 0 || errors > 500) {
+    return { ok: false, error: "bad_scan_counts" };
+  }
+  if (![startedAt, completedAt, durationMs].every(Number.isInteger)
+      || startedAt <= 0 || completedAt < startedAt
+      || durationMs < 0 || durationMs > 12 * 60 * 60 * 1000) {
+    return { ok: false, error: "bad_scan_timing" };
+  }
+  return {
+    ok: true,
+    item: {
+      runKind,
+      outcome,
+      successful: Number(
+        runKind === "full" && outcome === "completed"
+        && expected > 0 && checked === expected && errors === 0
+      ),
+      extensionVersion,
+      checked,
+      expected,
+      errors,
+      startedAt,
+      completedAt,
+      durationMs,
+    },
+  };
+}
+
+function scanSummaryStatement(env, instanceId, item) {
+  const hour = Math.floor(item.completedAt / 3600) * 3600;
+  return env.DB.prepare(
+    `INSERT INTO scan_completions_hourly
+       (hour, instance_id, run_kind, outcome, successful, extension_version,
+        checked, expected, errors, started_at, completed_at, duration_ms)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+     ON CONFLICT(hour, instance_id, run_kind) DO UPDATE SET
+       outcome = excluded.outcome,
+       successful = excluded.successful,
+       extension_version = excluded.extension_version,
+       checked = excluded.checked,
+       expected = excluded.expected,
+       errors = excluded.errors,
+       started_at = excluded.started_at,
+       completed_at = excluded.completed_at,
+       duration_ms = excluded.duration_ms
+     WHERE scan_completions_hourly.successful = 0 OR excluded.successful = 1`,
+  ).bind(
+    hour, instanceId, item.runKind, item.outcome, item.successful,
+    item.extensionVersion, item.checked, item.expected, item.errors,
+    item.startedAt, item.completedAt, item.durationMs,
+  );
 }
 
 function feedbackStatements(env, instanceId, items) {
@@ -1286,6 +1363,7 @@ async function purgeExpiredData(env) {
         )`,
     ).bind(cutoff),
     env.DB.prepare("DELETE FROM feedback_hourly WHERE hour < ?").bind(cutoffHour),
+    env.DB.prepare("DELETE FROM scan_completions_hourly WHERE hour < ?").bind(cutoffHour),
     env.DB.prepare(
       `DELETE FROM observations
         WHERE id IN (
@@ -1336,7 +1414,7 @@ async function handleAdminStats(request, env, ctx) {
   const startHour = currentHour - (hours - 1) * 3600;
   const trailing24h = now - 24 * 3600;
 
-  const [summaryResult, installsResult, feedbackResult] = await env.DB.batch([
+  const [summaryResult, installsResult, feedbackResult, scanResult] = await env.DB.batch([
     env.DB.prepare(
       `WITH installs AS (
          SELECT instance_id,
@@ -1382,6 +1460,18 @@ async function handleAdminStats(request, env, ctx) {
          feedback_24h.auto_request_users_24h,
          feedback_24h.accepted_users_24h,
          feedback_24h.feedback_events_24h,
+         (SELECT COUNT(DISTINCT instance_id) FROM scan_completions_hourly
+           WHERE hour >= ?1 AND run_kind = 'full' AND successful = 1)
+           AS full_scan_users_24h,
+         (SELECT COUNT(*) FROM scan_completions_hourly
+           WHERE hour >= ?1 AND run_kind = 'full' AND successful = 1)
+           AS full_scans_24h,
+         (SELECT MAX(completed_at) FROM scan_completions_hourly
+           WHERE run_kind = 'full' AND successful = 1)
+           AS latest_full_scan_at,
+         (SELECT COUNT(DISTINCT instance_id) FROM scan_completions_hourly
+           WHERE hour >= ?1 AND run_kind = 'full' AND outcome = 'blocked')
+           AS blocked_scan_users_24h,
          0 AS observations_24h,
          0 AS observed_asins_24h,
          0 AS feed_requests_24h
@@ -1434,6 +1524,21 @@ async function handleAdminStats(request, env, ctx) {
         GROUP BY hour
         ORDER BY hour`,
     ).bind(startHour),
+    env.DB.prepare(
+      `SELECT hour,
+              COUNT(DISTINCT CASE WHEN run_kind = 'full' AND successful = 1 THEN instance_id END)
+                AS full_scan_users,
+              COUNT(CASE WHEN run_kind = 'full' AND successful = 1 THEN 1 END)
+                AS full_scan_runs,
+              COUNT(DISTINCT CASE WHEN run_kind = 'full' AND outcome = 'blocked' THEN instance_id END)
+                AS blocked_scan_users,
+              COUNT(DISTINCT CASE WHEN run_kind = 'full' AND outcome = 'failed' THEN instance_id END)
+                AS failed_scan_users
+         FROM scan_completions_hourly
+        WHERE hour >= ?1
+        GROUP BY hour
+        ORDER BY hour`,
+    ).bind(startHour),
   ]);
 
   const hourly = Array.from({ length: hours }, (_, index) => ({
@@ -1444,6 +1549,10 @@ async function handleAdminStats(request, env, ctx) {
     feedback_events: 0,
     auto_request_users: 0,
     accepted_users: 0,
+    full_scan_users: 0,
+    full_scan_runs: 0,
+    blocked_scan_users: 0,
+    failed_scan_users: 0,
     observations: 0,
     distinct_asins: 0,
     feed_requests: 0,
@@ -1458,6 +1567,7 @@ async function handleAdminStats(request, env, ctx) {
   };
   mergeRows(installsResult, ["new_installations", "new_durable_installations"]);
   mergeRows(feedbackResult, ["scanning_users", "feedback_events", "auto_request_users", "accepted_users"]);
+  mergeRows(scanResult, ["full_scan_users", "full_scan_runs", "blocked_scan_users", "failed_scan_users"]);
 
   const summarySource = summaryResult.results?.[0] || {};
   const summary = Object.fromEntries([
@@ -1471,6 +1581,10 @@ async function handleAdminStats(request, env, ctx) {
     "auto_request_users_24h",
     "accepted_users_24h",
     "feedback_events_24h",
+    "full_scan_users_24h",
+    "full_scans_24h",
+    "latest_full_scan_at",
+    "blocked_scan_users_24h",
     "observations_24h",
     "observed_asins_24h",
     "feed_requests_24h",

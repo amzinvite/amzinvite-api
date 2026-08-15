@@ -20,7 +20,7 @@ function makeEnv() {
       };
     },
     async batch(statements) {
-      assert.equal(statements.length, 3);
+      assert.equal(statements.length, 4);
       assert.equal(statements[0].args[0], NOW - 24 * 3600);
       assert.equal(statements[1].args[0], CURRENT_HOUR - 47 * 3600);
       return [
@@ -36,6 +36,10 @@ function makeEnv() {
             auto_request_users_24h: 121,
             accepted_users_24h: 1,
             feedback_events_24h: 15171,
+            full_scan_users_24h: 98,
+            full_scans_24h: 112,
+            latest_full_scan_at: NOW - 90,
+            blocked_scan_users_24h: 7,
             observations_24h: 0,
             observed_asins_24h: 0,
             feed_requests_24h: 0,
@@ -53,6 +57,15 @@ function makeEnv() {
             feedback_events: 3367,
             auto_request_users: 72,
             accepted_users: 1,
+          }],
+        },
+        {
+          results: [{
+            hour: CURRENT_HOUR - 3600,
+            full_scan_users: 42,
+            full_scan_runs: 45,
+            blocked_scan_users: 3,
+            failed_scan_users: 2,
           }],
         },
       ];
@@ -92,6 +105,8 @@ try {
   assert.equal(payload.summary.unconfirmed_installations_seen, 138);
   assert.equal(payload.summary.new_durable_installations_24h, 146);
   assert.equal(payload.summary.auto_request_users_24h, 121);
+  assert.equal(payload.summary.full_scan_users_24h, 98);
+  assert.equal(payload.summary.latest_full_scan_at, NOW - 90);
   assert.equal(payload.hourly.length, 48);
   assert.equal(payload.hourly[0].hour, CURRENT_HOUR - 47 * 3600);
   assert.deepEqual(payload.hourly.at(-2), {
@@ -102,6 +117,10 @@ try {
     feedback_events: 3367,
     auto_request_users: 72,
     accepted_users: 1,
+    full_scan_users: 42,
+    full_scan_runs: 45,
+    blocked_scan_users: 3,
+    failed_scan_users: 2,
     observations: 0,
     distinct_asins: 0,
     feed_requests: 0,

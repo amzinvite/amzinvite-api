@@ -43,9 +43,9 @@ async function signedRequest(state, source = "bg_check") {
   });
 }
 
-async function signedBatchRequest(items) {
+async function signedBatchRequest(items, scanSummary = undefined) {
   const timestamp = Math.floor(Date.now() / 1000);
-  const body = JSON.stringify({ items });
+  const body = JSON.stringify({ items, ...(scanSummary ? { scanSummary } : {}) });
   const key = await crypto.subtle.importKey(
     "raw", new TextEncoder().encode(SECRET),
     { name: "HMAC", hash: "SHA-256" }, false, ["sign"],
@@ -133,5 +133,53 @@ const groupedResponse = await worker.fetch(await signedBatchRequest([
 assert.equal(groupedResponse.status, 200);
 assert.equal((await groupedResponse.json()).accepted, 2);
 assert.equal(grouped.batches[0].length, 3, "deux agrégats horaires et un événement accepté brut");
+
+const completed = makeEnv();
+const completedResponse = await worker.fetch(await signedBatchRequest([], {
+  runKind: "full",
+  outcome: "completed",
+  extensionVersion: "0.1.20",
+  checked: 51,
+  expected: 51,
+  errors: 0,
+  startedAt: 1786780800,
+  completedAt: 1786782600,
+  durationMs: 1800000,
+}), completed.env, {});
+assert.equal(completedResponse.status, 200);
+assert.deepEqual(await completedResponse.json(), { ok: true, accepted: 0, scan_summary: true });
+assert.equal(completed.batches[0].length, 1, "un résumé sans produit reste une seule écriture");
+assert.match(completed.batches[0][0].sql, /INSERT INTO scan_completions_hourly/);
+assert.equal(completed.batches[0][0].args[4], 1, "le succès complet est calculé côté Worker");
+
+const invalidSummary = makeEnv();
+const invalidResponse = await worker.fetch(await signedBatchRequest([], {
+  runKind: "full",
+  outcome: "completed",
+  extensionVersion: "0.1.20",
+  checked: 50,
+  expected: 51,
+  errors: 0,
+  startedAt: 1786780800,
+  completedAt: 1786782600,
+  durationMs: 1800000,
+}), invalidSummary.env, {});
+assert.equal(invalidResponse.status, 200);
+assert.equal(invalidSummary.batches[0][0].args[4], 0, "un cycle incomplet n'est jamais marqué réussi");
+
+const failedBeforeWatchlist = makeEnv();
+const failedBeforeWatchlistResponse = await worker.fetch(await signedBatchRequest([], {
+  runKind: "full",
+  outcome: "failed",
+  extensionVersion: "0.1.37",
+  checked: 0,
+  expected: 0,
+  errors: 1,
+  startedAt: 1786780800,
+  completedAt: 1786780801,
+  durationMs: 1000,
+}), failedBeforeWatchlist.env, {});
+assert.equal(failedBeforeWatchlistResponse.status, 200);
+assert.equal(failedBeforeWatchlist.batches[0][0].args[4], 0);
 
 console.log("feedback: déduplication horaire et brut sélectif validés");

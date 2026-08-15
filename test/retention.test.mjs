@@ -32,11 +32,12 @@ try {
   });
   await scheduledPromise;
 
-  assert.equal(statements.length, 4);
+  assert.equal(statements.length, 5);
   assert.match(statements[0].sql, /DELETE FROM extension_feedback/);
   assert.match(statements[1].sql, /DELETE FROM feedback_hourly/);
-  assert.match(statements[2].sql, /DELETE FROM observations/);
-  assert.match(statements[3].sql, /DELETE FROM observations_hourly/);
+  assert.match(statements[2].sql, /DELETE FROM scan_completions_hourly/);
+  assert.match(statements[3].sql, /DELETE FROM observations/);
+  assert.match(statements[4].sql, /DELETE FROM observations_hourly/);
   assert.equal(statements[0].args[0], Math.floor(NOW_MS / 1000) - 14 * 86400);
 
   statements.length = 0;
