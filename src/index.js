@@ -307,7 +307,9 @@ async function handlePublicWaves(env, ctx, { bypassCache = false } = {}) {
               COUNT(DISTINCT f.instance_id) AS active_users
          FROM wave_bounds b
          LEFT JOIN feedback_hourly f
-           ON f.last_received_at >= b.started_at AND f.first_received_at < b.ended_at
+           ON f.hour >= CAST(b.started_at / 3600 AS INTEGER) * 3600
+          AND f.hour <= CAST((b.ended_at - 1) / 3600 AS INTEGER) * 3600
+          AND f.last_received_at >= b.started_at AND f.first_received_at < b.ended_at
         GROUP BY b.wave_id
      ), wave_installs AS (
        SELECT b.wave_id,
@@ -335,7 +337,9 @@ async function handlePublicWaves(env, ctx, { bypassCache = false } = {}) {
               COUNT(DISTINCT f.instance_id) AS eligible_users
          FROM wave_bounds b
          JOIN feedback_hourly f
-           ON f.last_received_at >= b.started_at - 86400
+           ON f.hour >= CAST((b.started_at - 86400) / 3600 AS INTEGER) * 3600
+          AND f.hour <= CAST((b.ended_at - 1) / 3600 AS INTEGER) * 3600
+          AND f.last_received_at >= b.started_at - 86400
           AND f.first_received_at < b.ended_at
           AND f.state IN ('already_requested', 'accepted')
         GROUP BY b.wave_id, f.marketplace, f.asin
@@ -506,14 +510,23 @@ async function runScheduledMaintenance(env, cron = null) {
   const shouldPurge = cron == null || cron === "17 3 * * *";
   if (shouldArchive && env.WAVE_ARCHIVE_ENABLED !== "false") {
     try {
-      // Le cron doit relire les compteurs courants, sans reprendre une réponse
-      // publique potentiellement mise en cache juste avant la fin de vague.
-      const response = await handlePublicWaves(env, {}, { bypassCache: true });
-      if (response.ok) {
-        const payload = await response.json();
-        const archived = await persistFinalizedWaves(env, payload.waves || []);
-        if (archived > 0) {
-          await globalThis.caches?.default?.delete?.(new Request(PUBLIC_WAVES_CACHE_URL));
+      const now = Math.floor(Date.now() / 1000);
+      // Une vague ne peut se terminer qu'entre 24 h et 27 h après son créneau
+      // canonique (tolérance de détection de 3 h). Hors de cette courte fenêtre,
+      // le recalcul relirait inutilement tout feedback_hourly toutes les 15 min.
+      const archiveWindowOpen = canonicalWaveSlots(now, now - 2 * 86400).some(
+        (slot) => now >= slot.started_at + 86400 && now <= slot.started_at + 28 * 3600,
+      );
+      if (archiveWindowOpen) {
+        // Le cron doit relire les compteurs courants, sans reprendre une réponse
+        // publique potentiellement mise en cache juste avant la fin de vague.
+        const response = await handlePublicWaves(env, {}, { bypassCache: true });
+        if (response.ok) {
+          const payload = await response.json();
+          const archived = await persistFinalizedWaves(env, payload.waves || []);
+          if (archived > 0) {
+            await globalThis.caches?.default?.delete?.(new Request(PUBLIC_WAVES_CACHE_URL));
+          }
         }
       }
     } catch (error) {

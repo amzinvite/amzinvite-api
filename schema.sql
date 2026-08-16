@@ -62,6 +62,9 @@ CREATE TABLE IF NOT EXISTS feedback_hourly (
   last_received_at  INTEGER NOT NULL,
   PRIMARY KEY (hour, instance_id, marketplace, asin, state, source)
 ) WITHOUT ROWID;
+CREATE INDEX IF NOT EXISTS idx_feedback_hourly_accepted_hour
+  ON feedback_hourly(hour, instance_id, marketplace, asin)
+  WHERE state = 'accepted';
 
 -- Résumé léger des cycles : une ligne maximum par installation, heure et
 -- portée. Le résumé voyage dans le batch de feedback existant.
