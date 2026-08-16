@@ -59,7 +59,8 @@ const ADMIN_STATS_CACHE_TTL_SEC = 30 * 60;
 const RAW_FEEDBACK_STATES = new Set(["available", "accepted"]);
 const DEFAULT_RETENTION_DAYS = 14;
 const PUBLIC_WAVES_CACHE_TTL_SEC = 5 * 60;
-const PUBLIC_WAVES_CACHE_URL = "https://waves-cache.amzinvite.internal/v15";
+const PUBLIC_WAVES_CACHE_URL = "https://waves-cache.amzinvite.internal/v16";
+const PUBLIC_WAVES_SNAPSHOT_KEY = "public-waves-v16";
 const PARIS_TIME_ZONE = "Europe/Paris";
 const CANONICAL_WAVE_SLOTS = Object.freeze([
   { weekday: 1, hour: 22, minute: 0 },
@@ -240,6 +241,33 @@ async function handlePublicWaves(env, ctx, { bypassCache = false } = {}) {
       "Cache-Control": publicWavesCacheControl(cachedPayload),
       "X-Amzinvite-Cache": "HIT",
     });
+  }
+
+  // Le Cache API est local à chaque datacenter. Sans ce snapshot partagé,
+  // chaque colo qui rate son cache relance l'agrégation de centaines de
+  // milliers de feedbacks. D1 devient ici la source matérialisée globale :
+  // une seule ligne lue au lieu de plusieurs millions.
+  if (!bypassCache) {
+    const snapshot = await env.DB.prepare(
+      "SELECT payload FROM public_wave_snapshots WHERE cache_key = ?1 LIMIT 1",
+    ).bind(PUBLIC_WAVES_SNAPSHOT_KEY).first();
+    if (snapshot?.payload) {
+      try {
+        const snapshotPayload = JSON.parse(snapshot.payload);
+        const snapshotHeaders = {
+          "Cache-Control": publicWavesCacheControl(snapshotPayload),
+          "X-Amzinvite-Cache": "D1-SNAPSHOT",
+        };
+        if (cache) {
+          const write = cache.put(cacheKey, json(snapshotPayload, 200, snapshotHeaders));
+          if (ctx?.waitUntil) ctx.waitUntil(write);
+          else await write;
+        }
+        return json(snapshotPayload, 200, snapshotHeaders);
+      } catch (error) {
+        console.error("invalid public waves snapshot", error);
+      }
+    }
   }
 
   const now = Math.floor(Date.now() / 1000);
@@ -472,11 +500,17 @@ async function handlePublicWaves(env, ctx, { bypassCache = false } = {}) {
     "Cache-Control": publicWavesCacheControl(payload),
     "X-Amzinvite-Cache": "MISS",
   };
-  if (cache) {
-    const write = cache.put(cacheKey, json(payload, 200, responseHeaders));
-    if (ctx?.waitUntil) ctx.waitUntil(write);
-    else await write;
-  }
+  const writes = [env.DB.prepare(
+    `INSERT INTO public_wave_snapshots (cache_key, payload, generated_at)
+     VALUES (?1, ?2, ?3)
+     ON CONFLICT(cache_key) DO UPDATE SET
+       payload = excluded.payload,
+       generated_at = excluded.generated_at`,
+  ).bind(PUBLIC_WAVES_SNAPSHOT_KEY, JSON.stringify(payload), now).run()];
+  if (cache) writes.push(cache.put(cacheKey, json(payload, 200, responseHeaders)));
+  const persist = Promise.all(writes);
+  if (ctx?.waitUntil) ctx.waitUntil(persist);
+  else await persist;
   return json(payload, 200, responseHeaders);
 }
 
@@ -511,13 +545,13 @@ async function runScheduledMaintenance(env, cron = null) {
   if (shouldArchive && env.WAVE_ARCHIVE_ENABLED !== "false") {
     try {
       const now = Math.floor(Date.now() / 1000);
-      // Une vague ne peut se terminer qu'entre 24 h et 27 h après son créneau
-      // canonique (tolérance de détection de 3 h). Hors de cette courte fenêtre,
-      // le recalcul relirait inutilement tout feedback_hourly toutes les 15 min.
-      const archiveWindowOpen = canonicalWaveSlots(now, now - 2 * 86400).some(
-        (slot) => now >= slot.started_at + 86400 && now <= slot.started_at + 28 * 3600,
+      // Le cron est le seul producteur du snapshot partagé pendant une vague.
+      // Hors de la fenêtre active, le snapshot final reste valide et aucune
+      // agrégation lourde n'est nécessaire.
+      const refreshWindowOpen = canonicalWaveSlots(now, now - 2 * 86400).some(
+        (slot) => now >= slot.started_at - 900 && now <= slot.ended_at + 3 * 3600,
       );
-      if (archiveWindowOpen) {
+      if (refreshWindowOpen) {
         // Le cron doit relire les compteurs courants, sans reprendre une réponse
         // publique potentiellement mise en cache juste avant la fin de vague.
         const response = await handlePublicWaves(env, {}, { bypassCache: true });

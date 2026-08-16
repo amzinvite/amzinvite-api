@@ -8,6 +8,12 @@ function makeEnv() {
     DATA_RETENTION_DAYS: "14",
     DB: {
       prepare(sql) {
+        if (sql.includes("FROM public_wave_snapshots")) {
+          return { bind() { return this; }, async first() { return null; } };
+        }
+        if (sql.includes("INSERT INTO public_wave_snapshots")) {
+          return { bind() { return this; }, async run() { return { success: true }; } };
+        }
         if (sql.includes("FROM invitation_waves")) {
           return {
             async all() {
@@ -118,7 +124,26 @@ try {
   assert.match(cached.headers.get("Cache-Control"), /s-maxage=300/);
   assert.equal(reads, 0);
 
-  console.log("public waves: 2 passés, 0 échoué");
+  globalThis.caches = undefined;
+  let snapshotReads = 0;
+  const snapshotPayload = { generated_at: 123, waves: [] };
+  const snapshotted = await worker.fetch(new Request("https://api.test/api/public/waves"), {
+    DB: {
+      prepare(sql) {
+        snapshotReads += 1;
+        assert.match(sql, /FROM public_wave_snapshots/);
+        return {
+          bind() { return this; },
+          async first() { return { payload: JSON.stringify(snapshotPayload) }; },
+        };
+      },
+    },
+  }, {});
+  assert.equal(snapshotted.headers.get("X-Amzinvite-Cache"), "D1-SNAPSHOT");
+  assert.deepEqual(await snapshotted.json(), snapshotPayload);
+  assert.equal(snapshotReads, 1, "un cache miss régional ne doit lire qu'une ligne D1");
+
+  console.log("public waves: 3 passés, 0 échoué");
 } finally {
   globalThis.caches = originalCaches;
 }

@@ -104,6 +104,14 @@ CREATE TABLE IF NOT EXISTS invitation_waves (
 CREATE INDEX IF NOT EXISTS idx_invitation_waves_started
   ON invitation_waves(started_at DESC);
 
+-- Snapshot global des statistiques publiques. Le Cache API Workers étant
+-- régional, cette ligne empêche chaque datacenter de recalculer les agrégats.
+CREATE TABLE IF NOT EXISTS public_wave_snapshots (
+  cache_key    TEXT PRIMARY KEY,
+  payload      TEXT NOT NULL,
+  generated_at INTEGER NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS invitation_wave_products (
   wave_id TEXT NOT NULL,
   marketplace TEXT NOT NULL,
