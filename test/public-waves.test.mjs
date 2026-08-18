@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import worker, { canonicalWaveSlots } from "../src/index.js";
 
 const originalCaches = globalThis.caches;
+const originalDateNow = Date.now;
 
 function makeEnv() {
   return {
@@ -46,7 +47,10 @@ function makeEnv() {
         return {
           bind(cutoff, slots) {
             assert.ok(Number.isFinite(cutoff));
-            assert.ok(JSON.parse(slots).length >= 1);
+            const parsedSlots = JSON.parse(slots);
+            assert.equal(parsedSlots.length, 1, "seule la vague active doit être calculée");
+            assert.equal(cutoff, parsedSlots[0].started_at - 86400,
+              "le scan doit commencer à J-1 pour le calcul d'éligibilité");
             return this;
           },
           async all() {
@@ -78,6 +82,7 @@ function makeEnv() {
 }
 
 try {
+  Date.now = () => Date.parse("2026-08-07T10:00:00Z");
   const fridaySlots = canonicalWaveSlots(
     Date.parse("2026-08-07T10:00:00Z") / 1000,
     Date.parse("2026-07-24T10:00:00Z") / 1000,
@@ -146,4 +151,5 @@ try {
   console.log("public waves: 3 passés, 0 échoué");
 } finally {
   globalThis.caches = originalCaches;
+  Date.now = originalDateNow;
 }

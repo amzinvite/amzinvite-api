@@ -65,6 +65,9 @@ CREATE TABLE IF NOT EXISTS feedback_hourly (
 CREATE INDEX IF NOT EXISTS idx_feedback_hourly_accepted_hour
   ON feedback_hourly(hour, instance_id, marketplace, asin)
   WHERE state = 'accepted';
+CREATE INDEX IF NOT EXISTS idx_feedback_hourly_wave_signals
+  ON feedback_hourly(hour, state, instance_id, marketplace, asin)
+  WHERE state IN ('available', 'accepted');
 
 -- Résumé léger des cycles : une ligne maximum par installation, heure et
 -- portée. Le résumé voyage dans le batch de feedback existant.
@@ -188,6 +191,9 @@ CREATE TABLE IF NOT EXISTS observations_hourly (
   last_received_at  INTEGER NOT NULL,
   PRIMARY KEY (hour, marketplace, asin)
 ) WITHOUT ROWID;
+CREATE INDEX IF NOT EXISTS idx_observations_hourly_wave_images
+  ON observations_hourly(hour, marketplace, asin, last_received_at DESC)
+  WHERE image_url IS NOT NULL AND image_url <> '';
 
 -- Historique des anciens compteurs D1. Le Worker utilise désormais les
 -- bindings Rate Limiting natifs et n'écrit plus dans cette table.

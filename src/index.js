@@ -272,9 +272,17 @@ async function handlePublicWaves(env, ctx, { bypassCache = false } = {}) {
 
   const now = Math.floor(Date.now() / 1000);
   const retentionDays = Math.max(7, Math.min(90, Number.parseInt(env.DATA_RETENTION_DAYS || "14", 10) || 14));
-  const cutoff = now - retentionDays * 86400;
-  const waveSlots = canonicalWaveSlots(now, cutoff);
-  const result = await env.DB.prepare(
+  const archiveCutoff = now - retentionDays * 86400;
+  const waveSlots = canonicalWaveSlots(now, archiveCutoff).filter(
+    (slot) => now >= slot.started_at - 900 && now <= slot.ended_at + 3 * 3600,
+  );
+  // Les vagues terminées sont servies depuis invitation_waves. Le calcul
+  // dynamique ne doit donc parcourir que la vague active (et J-1, nécessaire
+  // au dénominateur eligible_users), jamais toute la rétention de 14 jours.
+  const liveCutoff = waveSlots.length > 0
+    ? Math.min(...waveSlots.map((slot) => slot.started_at - 86400))
+    : now;
+  const result = waveSlots.length === 0 ? { results: [] } : await env.DB.prepare(
     `WITH signal_hours AS (
        SELECT instance_id, marketplace, asin, state, hour,
               COALESCE(first_observed_at, first_received_at) AS observed_at
@@ -399,7 +407,7 @@ async function handlePublicWaves(env, ctx, { bypassCache = false } = {}) {
        LEFT JOIN latest_product_images x
          ON x.marketplace = p.marketplace AND x.asin = p.asin
       ORDER BY s.started_at DESC, product_selected_users DESC, p.name`,
-  ).bind(cutoff, JSON.stringify(waveSlots)).all();
+  ).bind(liveCutoff, JSON.stringify(waveSlots)).all();
 
   const wavesById = new Map();
   for (const row of result.results || []) {
