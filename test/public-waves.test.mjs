@@ -44,6 +44,10 @@ function makeEnv() {
         assert.match(sql, /a\.marketplace = p\.marketplace AND a\.asin = p\.asin/);
         assert.doesNotMatch(sql, /COUNT\(DISTINCT p\.asin\) AS products/);
         assert.match(sql, /c\.last_used_at - c\.created_at > 3600/);
+        assert.match(sql, /FROM invitation_wave_products archived_product/);
+        assert.match(sql, /archived_product\.marketplace = p\.marketplace/);
+        assert.match(sql, /archived_product\.asin = p\.asin/);
+        assert.match(sql, /ORDER BY archived_wave\.started_at DESC/);
         return {
           bind(cutoff, slots) {
             assert.ok(Number.isFinite(cutoff));
@@ -71,7 +75,7 @@ function makeEnv() {
                 marketplace: "amazon.fr", asin: "B0H294B5WK",
                 name: "Méga-Amphinobi-ex", product_selected_users: 19,
                 product_validations: 19, eligible_users: 180,
-                image_url: "https://tracker.example/image.jpg",
+                image_url: "https://m.media-amazon.com/images/I/amphinobi-archive.jpg",
               },
             ] };
           },
@@ -109,7 +113,11 @@ try {
   assert.equal(payload.waves[0].items.length, 2);
   assert.equal(payload.waves[0].items[0].selection_rate, 10 / 120);
   assert.equal(payload.waves[0].items[0].image_url, "https://m.media-amazon.com/images/I/tripack.jpg");
-  assert.equal(payload.waves[0].items[1].image_url, null);
+  assert.equal(
+    payload.waves[0].items[1].image_url,
+    "https://m.media-amazon.com/images/I/amphinobi-archive.jpg",
+    "une vague live sans image récente doit reprendre la dernière image archivée",
+  );
   assert.equal(payload.waves[1].items[0].name, "Produit archivé");
   assert.equal(payload.waves[1].finalized, true, "seule une vague archivée est figée");
 

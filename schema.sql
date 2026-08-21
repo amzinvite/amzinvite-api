@@ -128,6 +128,9 @@ CREATE TABLE IF NOT EXISTS invitation_wave_products (
   PRIMARY KEY (wave_id, marketplace, asin),
   FOREIGN KEY (wave_id) REFERENCES invitation_waves(id) ON DELETE CASCADE
 );
+CREATE INDEX IF NOT EXISTS idx_wave_products_latest_image
+  ON invitation_wave_products(marketplace, asin, wave_id DESC)
+  WHERE image_url IS NOT NULL AND image_url <> '';
 
 -- Credentials HMAC aléatoires v2. Les credentials "instance" sont liés à
 -- l'UUID anonyme ; ceux d'"observations" sont courts et non rattachés.

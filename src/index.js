@@ -397,7 +397,21 @@ async function handlePublicWaves(env, ctx, { bypassCache = false } = {}) {
             p.selected_users AS product_selected_users,
             p.validations AS product_validations,
             COALESCE(e.eligible_users, p.selected_users) AS eligible_users,
-            x.image_url
+            COALESCE(
+              x.image_url,
+              (
+                SELECT archived_product.image_url
+                  FROM invitation_wave_products archived_product
+                  JOIN invitation_waves archived_wave
+                    ON archived_wave.id = archived_product.wave_id
+                 WHERE archived_product.marketplace = p.marketplace
+                   AND archived_product.asin = p.asin
+                   AND archived_product.image_url IS NOT NULL
+                   AND archived_product.image_url <> ''
+                 ORDER BY archived_wave.started_at DESC
+                 LIMIT 1
+              )
+            ) AS image_url
        FROM wave_summary s
        JOIN wave_activity a ON a.wave_id = s.wave_id
        JOIN wave_installs n ON n.wave_id = s.wave_id
