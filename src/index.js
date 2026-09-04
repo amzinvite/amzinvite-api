@@ -72,6 +72,7 @@ const WAVE_END_OVERRIDES = new Map([
   [1786694400, 1786809600],
 ]);
 const WAVE_CANARY_PERCENT = 10;
+const PUBLIC_WAVE_PREOPEN_SECONDS = 5 * 60;
 const WAVE_INITIAL_SCAN_LAST_BASE_MINUTE = 28;
 const WAVE_STATS_SCAN_OFFSETS_MINUTES = Object.freeze([60, 180, 360, 720, 1260, 1320, 1380]);
 
@@ -143,12 +144,36 @@ export function canonicalWaveSlots(nowEpoch, cutoffEpoch) {
         slot.hour, slot.minute,
       );
       const endedAt = waveEndAt(startedAt);
-      if (startedAt <= nowEpoch && endedAt >= cutoffEpoch) {
+      if (startedAt <= nowEpoch + PUBLIC_WAVE_PREOPEN_SECONDS && endedAt >= cutoffEpoch) {
         slots.push({ id: String(startedAt), started_at: startedAt, ended_at: endedAt });
       }
     }
   }
   return slots.sort((a, b) => a.started_at - b.started_at);
+}
+
+export function withPreopenedWave(payload, nowEpoch = Math.floor(Date.now() / 1000)) {
+  const waves = Array.isArray(payload?.waves) ? payload.waves : [];
+  const slot = canonicalWaveSlots(nowEpoch, nowEpoch - 86400)
+    .filter((item) => nowEpoch >= item.started_at - PUBLIC_WAVE_PREOPEN_SECONDS && nowEpoch < item.ended_at)
+    .at(-1);
+  if (!slot || waves.some((wave) => String(wave.id) === String(slot.id))) return payload;
+  const emptyWave = {
+    ...slot,
+    detected_at: slot.started_at,
+    finalized: false,
+    installations: 0,
+    active_users: 0,
+    selected_users: 0,
+    validations: 0,
+    products: 0,
+    selection_rate: 0,
+    items: [],
+  };
+  return {
+    ...payload,
+    waves: [emptyWave, ...waves].sort((left, right) => right.started_at - left.started_at),
+  };
 }
 
 export function normalizeObservationPrice(value) {
@@ -236,7 +261,7 @@ async function handlePublicWaves(env, ctx, { bypassCache = false } = {}) {
   const cacheKey = new Request(PUBLIC_WAVES_CACHE_URL);
   const cached = cache && !bypassCache ? await cache.match(cacheKey) : null;
   if (cached) {
-    const cachedPayload = await cached.json();
+    const cachedPayload = withPreopenedWave(await cached.json());
     return json(cachedPayload, 200, {
       "Cache-Control": publicWavesCacheControl(cachedPayload),
       "X-Amzinvite-Cache": "HIT",
@@ -253,7 +278,7 @@ async function handlePublicWaves(env, ctx, { bypassCache = false } = {}) {
     ).bind(PUBLIC_WAVES_SNAPSHOT_KEY).first();
     if (snapshot?.payload) {
       try {
-        const snapshotPayload = JSON.parse(snapshot.payload);
+        const snapshotPayload = withPreopenedWave(JSON.parse(snapshot.payload));
         const snapshotHeaders = {
           "Cache-Control": publicWavesCacheControl(snapshotPayload),
           "X-Amzinvite-Cache": "D1-SNAPSHOT",
@@ -512,12 +537,12 @@ async function handlePublicWaves(env, ctx, { bypassCache = false } = {}) {
     wavesById.set(id, wave);
   }
 
-  const payload = {
+  const payload = withPreopenedWave({
     generated_at: now,
     window_days: retentionDays,
     methodology: "Statistiques anonymes amzinvite, dédupliquées par installation durable et ASIN. Une installation est confirmée après plus d’une heure de réutilisation du même identifiant anonyme.",
     waves: Array.from(wavesById.values()).sort((a, b) => b.started_at - a.started_at),
-  };
+  }, now);
   const responseHeaders = {
     "Cache-Control": publicWavesCacheControl(payload),
     "X-Amzinvite-Cache": "MISS",

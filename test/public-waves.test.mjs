@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import worker, { canonicalWaveSlots } from "../src/index.js";
+import worker, { canonicalWaveSlots, withPreopenedWave } from "../src/index.js";
 
 const originalCaches = globalThis.caches;
 const originalDateNow = Date.now;
@@ -100,26 +100,42 @@ try {
   ).find((slot) => slot.started_at === Date.parse("2026-08-14T08:00:00Z") / 1000);
   assert.equal(extendedWave.ended_at, Date.parse("2026-08-15T16:00:00Z") / 1000);
 
+  const beforePreopen = withPreopenedWave(
+    { generated_at: 1, waves: [] },
+    Date.parse("2026-08-07T07:54:59Z") / 1000,
+  );
+  assert.equal(beforePreopen.waves.length, 0);
+  const preopened = withPreopenedWave(
+    { generated_at: 1, waves: [] },
+    Date.parse("2026-08-07T07:55:00Z") / 1000,
+  );
+  assert.equal(preopened.waves.length, 1);
+  assert.equal(preopened.waves[0].started_at, Date.parse("2026-08-07T08:00:00Z") / 1000);
+  assert.equal(preopened.waves[0].products, 0);
+  assert.deepEqual(preopened.waves[0].items, []);
+
   globalThis.caches = undefined;
   const response = await worker.fetch(new Request("https://api.test/api/public/waves"), makeEnv(), {});
   assert.equal(response.status, 200);
   assert.match(response.headers.get("Cache-Control"), /s-maxage=60/);
   const payload = await response.json();
-  assert.equal(payload.waves.length, 2);
-  assert.equal(payload.waves[0].active_users, 396);
-  assert.equal(payload.waves[0].finalized, false, "une vague calculée en direct ne doit pas déclencher la notification");
-  assert.equal(payload.waves[0].detected_at, 1785790716);
+  assert.equal(payload.waves.length, 3);
+  const liveWave = payload.waves.find((wave) => wave.id === "1785790156");
+  assert.equal(liveWave.active_users, 396);
+  assert.equal(liveWave.finalized, false, "une vague calculée en direct ne doit pas déclencher la notification");
+  assert.equal(liveWave.detected_at, 1785790716);
   assert.match(payload.methodology, /installation durable/);
-  assert.equal(payload.waves[0].items.length, 2);
-  assert.equal(payload.waves[0].items[0].selection_rate, 10 / 120);
-  assert.equal(payload.waves[0].items[0].image_url, "https://m.media-amazon.com/images/I/tripack.jpg");
+  assert.equal(liveWave.items.length, 2);
+  assert.equal(liveWave.items[0].selection_rate, 10 / 120);
+  assert.equal(liveWave.items[0].image_url, "https://m.media-amazon.com/images/I/tripack.jpg");
   assert.equal(
-    payload.waves[0].items[1].image_url,
+    liveWave.items[1].image_url,
     "https://m.media-amazon.com/images/I/amphinobi-archive.jpg",
     "une vague live sans image récente doit reprendre la dernière image archivée",
   );
-  assert.equal(payload.waves[1].items[0].name, "Produit archivé");
-  assert.equal(payload.waves[1].finalized, true, "seule une vague archivée est figée");
+  const archivedWave = payload.waves.find((wave) => wave.id === "1785000000");
+  assert.equal(archivedWave.items[0].name, "Produit archivé");
+  assert.equal(archivedWave.finalized, true, "seule une vague archivée est figée");
 
   let reads = 0;
   globalThis.caches = {
@@ -134,7 +150,8 @@ try {
     DB: { prepare() { reads += 1; } },
   }, {});
   assert.equal(cached.headers.get("X-Amzinvite-Cache"), "HIT");
-  assert.match(cached.headers.get("Cache-Control"), /s-maxage=300/);
+  assert.match(cached.headers.get("Cache-Control"), /s-maxage=60/);
+  assert.equal((await cached.json()).waves.length, 1);
   assert.equal(reads, 0);
 
   globalThis.caches = undefined;
@@ -153,7 +170,10 @@ try {
     },
   }, {});
   assert.equal(snapshotted.headers.get("X-Amzinvite-Cache"), "D1-SNAPSHOT");
-  assert.deepEqual(await snapshotted.json(), snapshotPayload);
+  const snapshotResponse = await snapshotted.json();
+  assert.equal(snapshotResponse.generated_at, snapshotPayload.generated_at);
+  assert.equal(snapshotResponse.waves.length, 1);
+  assert.deepEqual(snapshotResponse.waves[0].items, []);
   assert.equal(snapshotReads, 1, "un cache miss régional ne doit lire qu'une ligne D1");
 
   console.log("public waves: 3 passés, 0 échoué");
