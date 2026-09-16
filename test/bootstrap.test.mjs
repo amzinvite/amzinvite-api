@@ -14,8 +14,10 @@ assert.ok(canaryShare >= 0.07 && canaryShare <= 0.13);
 
 const fridayDuringWave = Date.parse("2026-08-14T08:30:00Z") / 1000;
 const fridaySlots = upcomingWaveSlots(fridayDuringWave);
-assert.equal(fridaySlots[0].starts_at, Date.parse("2026-08-14T08:00:00Z") / 1000);
-assert.equal(fridaySlots[0].ends_at, Date.parse("2026-08-15T16:00:00Z") / 1000);
+const currentFridaySlot = fridaySlots.find(
+  (slot) => slot.starts_at === Date.parse("2026-08-14T08:00:00Z") / 1000,
+);
+assert.equal(currentFridaySlot.ends_at, Date.parse("2026-08-15T16:00:00Z") / 1000);
 assert.ok(fridaySlots.some((slot) => slot.starts_at === Date.parse("2026-08-17T20:00:00Z") / 1000));
 
 async function signedRequest() {

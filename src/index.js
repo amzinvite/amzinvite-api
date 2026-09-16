@@ -64,6 +64,7 @@ const PUBLIC_WAVES_SNAPSHOT_KEY = "public-waves-v16";
 const PARIS_TIME_ZONE = "Europe/Paris";
 const CANONICAL_WAVE_SLOTS = Object.freeze([
   { weekday: 1, hour: 22, minute: 0 },
+  { weekday: 3, hour: 10, minute: 0 },
   { weekday: 5, hour: 10, minute: 0 },
 ]);
 // Exception éditoriale unique : laisser la vague du 14 août 2026 collecter
@@ -235,6 +236,9 @@ export default {
       if (url.pathname === "/api/admin/stats" && request.method === "GET") {
         return await handleAdminStats(request, env, ctx);
       }
+      if (url.pathname === "/api/admin/waves/open-etb-30e" && request.method === "POST") {
+        return await handleAdminOpenEtb30Wave(request, env, ctx);
+      }
       if (url.pathname === "/" || url.pathname === "/healthz") {
         return json({ ok: true, service: "amzinvite-api" });
       }
@@ -338,7 +342,7 @@ async function handlePublicWaves(env, ctx, { bypassCache = false } = {}) {
          FROM configured_bounds b
          JOIN wave_signals s ON s.wave_id = b.wave_id
         GROUP BY b.wave_id, b.started_at, b.ended_at
-       HAVING COUNT(DISTINCT s.instance_id) >= 2
+       HAVING COUNT(DISTINCT s.instance_id) >= 1
      ), wave_products AS (
        SELECT DISTINCT s.wave_id, s.marketplace, s.asin
          FROM wave_bounds b
@@ -508,7 +512,7 @@ async function handlePublicWaves(env, ctx, { bypassCache = false } = {}) {
         started_at: Number(row.started_at),
         detected_at: Number(row.detected_at || row.started_at),
         ended_at: Number(row.ended_at),
-        finalized: true,
+        finalized: Number(row.ended_at) <= now,
         installations: Number(row.installations || 0),
         active_users: Number(row.active_users || 0),
         selected_users: Number(row.selected_users || 0),
@@ -559,6 +563,26 @@ async function handlePublicWaves(env, ctx, { bypassCache = false } = {}) {
   if (ctx?.waitUntil) ctx.waitUntil(persist);
   else await persist;
   return json(payload, 200, responseHeaders);
+}
+
+async function handleAdminOpenEtb30Wave(request, env, ctx) {
+  const token = request.headers.get("X-Admin-Token");
+  if (!token || !constantTimeEqual(token, env.ADMIN_TOKEN || "")) {
+    return json({ error: "unauthorized" }, 401);
+  }
+
+  await env.DB.batch([
+    env.DB.prepare("DELETE FROM invitation_wave_products WHERE wave_id = ?1")
+      .bind("manual-20260916-etb-30e"),
+    env.DB.prepare("DELETE FROM invitation_waves WHERE id = ?1")
+      .bind("manual-20260916-etb-30e"),
+    env.DB.prepare("DELETE FROM public_wave_snapshots WHERE cache_key = ?1")
+      .bind(PUBLIC_WAVES_SNAPSHOT_KEY),
+  ]);
+  await globalThis.caches?.default?.delete?.(new Request(PUBLIC_WAVES_CACHE_URL));
+  const refreshed = await handlePublicWaves(env, ctx, { bypassCache: true });
+  const waves = refreshed.ok ? (await refreshed.json()).waves || [] : [];
+  return json({ ok: true, wave: waves.find((wave) => !wave.finalized) || null });
 }
 
 export function upcomingWaveSlots(nowEpoch, count = 6) {
@@ -664,7 +688,9 @@ function safePublicAmazonImage(value) {
     const url = new URL(String(value));
     const host = url.hostname.toLowerCase();
     if (url.protocol !== "https:") return null;
-    if (host !== "m.media-amazon.com" && !host.endsWith(".ssl-images-amazon.com")) return null;
+    const isAmazonImage = host === "m.media-amazon.com" || host.endsWith(".ssl-images-amazon.com");
+    const isPrixTcgImage = host === "prixtcg.fr" && url.pathname.startsWith("/images/");
+    if (!isAmazonImage && !isPrixTcgImage) return null;
     return url.toString();
   } catch {
     return null;

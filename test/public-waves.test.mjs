@@ -25,7 +25,8 @@ function makeEnv() {
                 marketplace: "amazon.fr", asin: "B0ARCHIVE1",
                 name: "Produit archivé", product_selected_users: 4,
                 product_validations: 4, eligible_users: 100,
-                product_selection_rate: 0.04, image_url: null,
+                product_selection_rate: 0.04,
+                image_url: "https://prixtcg.fr/images/p1018.png?v=2664-media13",
               }] };
             },
           };
@@ -37,7 +38,7 @@ function makeEnv() {
         assert.match(sql, /s\.signal_at < b\.ended_at \+ 10800/);
         assert.match(sql, /b\.ended_at/);
         assert.match(sql, /MIN\(s\.signal_at\) AS detected_at/);
-        assert.match(sql, /HAVING COUNT\(DISTINCT s\.instance_id\) >= 2/);
+        assert.match(sql, /HAVING COUNT\(DISTINCT s\.instance_id\) >= 1/);
         assert.match(sql, /LEFT JOIN acceptance_events/);
         assert.doesNotMatch(sql, /selected_product_summary/);
         assert.match(sql, /CASE WHEN a\.instance_id IS NOT NULL/);
@@ -94,6 +95,12 @@ try {
   assert.ok(fridaySlots.some((slot) => slot.started_at === Date.parse("2026-08-07T08:00:00Z") / 1000));
   assert.ok(fridaySlots.some((slot) => slot.started_at === Date.parse("2026-08-03T20:00:00Z") / 1000));
 
+  const wednesdaySlots = canonicalWaveSlots(
+    Date.parse("2026-09-16T10:00:00Z") / 1000,
+    Date.parse("2026-09-15T00:00:00Z") / 1000,
+  );
+  assert.ok(wednesdaySlots.some((slot) => slot.started_at === Date.parse("2026-09-16T08:00:00Z") / 1000));
+
   const extendedWave = canonicalWaveSlots(
     Date.parse("2026-08-15T10:00:00Z") / 1000,
     Date.parse("2026-08-14T00:00:00Z") / 1000,
@@ -135,6 +142,11 @@ try {
   );
   const archivedWave = payload.waves.find((wave) => wave.id === "1785000000");
   assert.equal(archivedWave.items[0].name, "Produit archivé");
+  assert.equal(
+    archivedWave.items[0].image_url,
+    "https://prixtcg.fr/images/p1018.png?v=2664-media13",
+    "une image produit PrixTCG explicitement servie sous /images doit rester publique",
+  );
   assert.equal(archivedWave.finalized, true, "seule une vague archivée est figée");
 
   let reads = 0;
