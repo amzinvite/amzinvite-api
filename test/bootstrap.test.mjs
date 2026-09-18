@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import worker, { initialWaveScanOffset, upcomingWaveSlots } from "../src/index.js";
+import worker, { configuredWaveSlots, initialWaveScanOffset, upcomingWaveSlots } from "../src/index.js";
 
 const INSTANCE_ID = "01234567-89ab-4def-8123-456789abcdef";
 const CREDENTIAL_ID = "11111111-1111-4111-8111-111111111111";
@@ -19,6 +19,28 @@ const currentFridaySlot = fridaySlots.find(
 );
 assert.equal(currentFridaySlot.ends_at, Date.parse("2026-08-15T16:00:00Z") / 1000);
 assert.ok(fridaySlots.some((slot) => slot.starts_at === Date.parse("2026-08-17T20:00:00Z") / 1000));
+
+const manualStart = Date.parse("2026-09-18T08:50:00Z") / 1000;
+const configured = await configuredWaveSlots({
+  DB: {
+    prepare(sql) {
+      assert.match(sql, /FROM manual_wave_schedule/);
+      return {
+        bind() { return this; },
+        async all() {
+          return { results: [{ id: "manual-test", starts_at: manualStart, ends_at: manualStart + 86400, label: "Vague manuelle" }] };
+        },
+      };
+    },
+  },
+}, manualStart + 3600, manualStart - 86400);
+assert.deepEqual(configured.find((slot) => slot.id === "manual-test"), {
+  id: "manual-test",
+  starts_at: manualStart,
+  ends_at: manualStart + 86400,
+  label: "Vague manuelle",
+  source: "manual",
+});
 
 async function signedRequest() {
   const timestamp = Math.floor(Date.now() / 1000);
@@ -68,6 +90,7 @@ try {
           },
           async run() { return {}; },
           async all() {
+            if (/FROM manual_wave_schedule/.test(sql)) return { results: [] };
             if (/FROM invitations/.test(sql)) {
               return { results: [{ asin: "B0TEST0001", marketplace: "amazon.fr", url: "https://www.amazon.fr/dp/B0TEST0001", first_seen: 1 }] };
             }

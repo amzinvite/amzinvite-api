@@ -14,7 +14,7 @@
 
 const CORS_HEADERS = {
   "Access-Control-Allow-Origin": "*",
-  "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
+  "Access-Control-Allow-Methods": "GET, POST, DELETE, OPTIONS",
   "Access-Control-Allow-Headers": "Content-Type, X-Instance-Id, X-Auth-Version, X-Credential-Id, X-Ts, X-Sig, X-Admin-Token",
   "Access-Control-Max-Age": "86400",
 };
@@ -239,6 +239,12 @@ export default {
       if (url.pathname === "/api/admin/waves/open-etb-30e" && request.method === "POST") {
         return await handleAdminOpenEtb30Wave(request, env, ctx);
       }
+      if (url.pathname === "/api/admin/waves/manual" && request.method === "POST") {
+        return await handleAdminManualWave(request, env);
+      }
+      if (url.pathname === "/api/admin/waves/manual" && request.method === "DELETE") {
+        return await handleAdminDeleteManualWave(request, env);
+      }
       if (url.pathname === "/" || url.pathname === "/healthz") {
         return json({ ok: true, service: "amzinvite-api" });
       }
@@ -302,7 +308,7 @@ async function handlePublicWaves(env, ctx, { bypassCache = false } = {}) {
   const now = Math.floor(Date.now() / 1000);
   const retentionDays = Math.max(7, Math.min(90, Number.parseInt(env.DATA_RETENTION_DAYS || "14", 10) || 14));
   const archiveCutoff = now - retentionDays * 86400;
-  const waveSlots = canonicalWaveSlots(now, archiveCutoff).filter(
+  const waveSlots = (await configuredWaveSlots(env, now, archiveCutoff)).filter(
     (slot) => now >= slot.started_at - 900 && now <= slot.ended_at + 3 * 3600,
   );
   // Les vagues terminées sont servies depuis invitation_waves. Le calcul
@@ -583,6 +589,78 @@ async function handleAdminOpenEtb30Wave(request, env, ctx) {
   const refreshed = await handlePublicWaves(env, ctx, { bypassCache: true });
   const waves = refreshed.ok ? (await refreshed.json()).waves || [] : [];
   return json({ ok: true, wave: waves.find((wave) => !wave.finalized) || null });
+}
+
+function checkAdminToken(request, env) {
+  const token = request.headers.get("X-Admin-Token");
+  return Boolean(token && constantTimeEqual(token, env.ADMIN_TOKEN || ""));
+}
+
+async function clearWaveCaches(env) {
+  await env.DB.prepare("DELETE FROM public_wave_snapshots WHERE cache_key = ?1")
+    .bind(PUBLIC_WAVES_SNAPSHOT_KEY).run();
+  await globalThis.caches?.default?.delete?.(new Request(PUBLIC_WAVES_CACHE_URL));
+}
+
+async function handleAdminManualWave(request, env) {
+  if (!checkAdminToken(request, env)) return json({ error: "unauthorized" }, 401);
+  const payload = await request.json().catch(() => null);
+  if (!payload || typeof payload !== "object") return json({ error: "bad_json" }, 400);
+  const startedAt = Number(payload.starts_at ?? payload.startsAt);
+  const endedAt = Number(payload.ends_at ?? payload.endsAt ?? (startedAt + 86400));
+  const now = Math.floor(Date.now() / 1000);
+  if (!Number.isInteger(startedAt) || !Number.isInteger(endedAt)
+      || startedAt < now - 7 * 86400 || startedAt > now + 30 * 86400
+      || endedAt <= startedAt || endedAt - startedAt > 72 * 3600) {
+    return json({ error: "bad_wave_window" }, 400);
+  }
+  const id = String(payload.id || `manual-${startedAt}`).trim();
+  const label = String(payload.label || "Vague exceptionnelle").trim().slice(0, 80);
+  if (!/^[a-zA-Z0-9_-]{3,80}$/.test(id) || !label) return json({ error: "bad_wave_identity" }, 400);
+  await env.DB.prepare(
+    `INSERT INTO manual_wave_schedule (id, starts_at, ends_at, label, active, created_at, updated_at)
+     VALUES (?1, ?2, ?3, ?4, 1, ?5, ?5)
+     ON CONFLICT(id) DO UPDATE SET
+       starts_at = excluded.starts_at,
+       ends_at = excluded.ends_at,
+       label = excluded.label,
+       active = 1,
+       updated_at = excluded.updated_at`,
+  ).bind(id, startedAt, endedAt, label, now).run();
+  await clearWaveCaches(env);
+  return json({ ok: true, wave: { id, starts_at: startedAt, ends_at: endedAt, label, source: "manual" } });
+}
+
+async function handleAdminDeleteManualWave(request, env) {
+  if (!checkAdminToken(request, env)) return json({ error: "unauthorized" }, 401);
+  const id = new URL(request.url).searchParams.get("id") || "";
+  if (!/^[a-zA-Z0-9_-]{3,80}$/.test(id)) return json({ error: "bad_wave_identity" }, 400);
+  await env.DB.prepare("UPDATE manual_wave_schedule SET active = 0, updated_at = ?2 WHERE id = ?1")
+    .bind(id, Math.floor(Date.now() / 1000)).run();
+  await clearWaveCaches(env);
+  return json({ ok: true, id });
+}
+
+async function manualWaveSlots(env, nowEpoch, cutoffEpoch = nowEpoch - 7 * 86400) {
+  const result = await env.DB.prepare(
+    `SELECT id, starts_at, ends_at, label
+       FROM manual_wave_schedule
+      WHERE active = 1 AND ends_at >= ?1 AND starts_at <= ?2
+      ORDER BY starts_at ASC`,
+  ).bind(cutoffEpoch, nowEpoch + 30 * 86400).all();
+  return (result.results || []).map((wave) => ({
+    id: String(wave.id),
+    starts_at: Number(wave.starts_at),
+    ends_at: Number(wave.ends_at),
+    label: String(wave.label || "Vague exceptionnelle"),
+    source: "manual",
+  }));
+}
+
+export async function configuredWaveSlots(env, nowEpoch, cutoffEpoch = nowEpoch - 7 * 86400) {
+  const slots = [...canonicalWaveSlots(nowEpoch, cutoffEpoch), ...await manualWaveSlots(env, nowEpoch, cutoffEpoch)];
+  const unique = new Map(slots.map((slot) => [String(slot.id), slot]));
+  return [...unique.values()].sort((left, right) => left.starts_at - right.starts_at);
 }
 
 export function upcomingWaveSlots(nowEpoch, count = 6) {
@@ -869,7 +947,7 @@ async function handleExtensionBootstrap(request, env, ctx) {
     schedule: {
       version: "2026-08-15.1",
       timezone: PARIS_TIME_ZONE,
-      waves: upcomingWaveSlots(now),
+      waves: await configuredWaveSlots(env, now, now - 4 * 86400),
       // Un seul premier scan par installation entre T+0 et T+29. Environ 10 %
       // des installations servent de canaris pendant les deux premières minutes;
       // les autres sont réparties de façon stable jusqu'à T+29. Les scans plus

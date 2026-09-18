@@ -9,6 +9,9 @@ function makeEnv() {
     DATA_RETENTION_DAYS: "14",
     DB: {
       prepare(sql) {
+        if (sql.includes("FROM manual_wave_schedule")) {
+          return { bind() { return this; }, async all() { return { results: [] }; } };
+        }
         if (sql.includes("FROM public_wave_snapshots")) {
           return { bind() { return this; }, async first() { return null; } };
         }

@@ -119,6 +119,21 @@ CREATE TABLE IF NOT EXISTS invitation_waves (
 CREATE INDEX IF NOT EXISTS idx_invitation_waves_started
   ON invitation_waves(started_at DESC);
 
+-- Fenêtres exceptionnelles pilotées par l'API admin. Elles complètent les
+-- créneaux hebdomadaires sans nécessiter de nouvelle version de l'extension.
+CREATE TABLE IF NOT EXISTS manual_wave_schedule (
+  id TEXT PRIMARY KEY,
+  starts_at INTEGER NOT NULL,
+  ends_at INTEGER NOT NULL,
+  label TEXT NOT NULL DEFAULT 'Vague exceptionnelle',
+  active INTEGER NOT NULL DEFAULT 1,
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL,
+  CHECK (ends_at > starts_at)
+);
+CREATE INDEX IF NOT EXISTS idx_manual_wave_schedule_active
+  ON manual_wave_schedule(active, starts_at, ends_at);
+
 -- Snapshot global des statistiques publiques. Le Cache API Workers étant
 -- régional, cette ligne empêche chaque datacenter de recalculer les agrégats.
 CREATE TABLE IF NOT EXISTS public_wave_snapshots (
