@@ -101,7 +101,7 @@ function publicWavesCacheControl(payload) {
 
 function hasCurrentRefreshMetadata(payload) {
   const hasLiveWave = Array.isArray(payload?.waves) && payload.waves.some((wave) => !wave.finalized);
-  return !hasLiveWave || Number.isFinite(Number(payload?.next_refresh_at));
+  return !hasLiveWave || (typeof payload?.next_refresh_at === "number" && Number.isFinite(payload.next_refresh_at));
 }
 
 function parisParts(date) {
