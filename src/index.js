@@ -944,7 +944,9 @@ async function handleMonitoringFeed(request, env) {
 // ─────────────────────────────────────────────────────────────────────────
 // POST /api/extension/feedback
 // Headers: X-Instance-Id, X-Ts, X-Sig
-// Body: { asin, state, source, observedAt }
+// Body: { asin, state, source, observedAt, primeStatus,
+//         invitationRemainingSeconds, invitationExpiresAt,
+//         invitationGrantedAtEstimated }
 // ─────────────────────────────────────────────────────────────────────────
 async function handleFeedback(request, env) {
   const instanceId = request.headers.get("X-Instance-Id");
@@ -1029,6 +1031,22 @@ function normalizeFeedbackItem(payload) {
   if (!["available", "already_requested", "accepted", "not_invitation", "stub_no_data"].includes(payload.state)) {
     return { ok: false, error: "bad_state" };
   }
+  const primeStatus = String(payload.primeStatus || "unknown");
+  if (!["prime", "non_prime", "unknown"].includes(primeStatus)) {
+    return { ok: false, error: "bad_prime_status" };
+  }
+  const invitationRemainingSeconds = optionalInteger(payload.invitationRemainingSeconds, 0, 72 * 3600);
+  const invitationExpiresAt = optionalInteger(payload.invitationExpiresAt, 1, 4_102_444_800);
+  const invitationGrantedAtEstimated = optionalInteger(payload.invitationGrantedAtEstimated, 1, 4_102_444_800);
+  if ([invitationRemainingSeconds, invitationExpiresAt, invitationGrantedAtEstimated].includes(false)) {
+    return { ok: false, error: "bad_invitation_timing" };
+  }
+  const hasInvitationTiming = invitationRemainingSeconds != null
+    || invitationExpiresAt != null
+    || invitationGrantedAtEstimated != null;
+  if (payload.state !== "accepted" && hasInvitationTiming) {
+    return { ok: false, error: "invitation_timing_requires_accepted" };
+  }
   return {
     ok: true,
     item: {
@@ -1037,8 +1055,18 @@ function normalizeFeedbackItem(payload) {
       state: payload.state,
       source: payload.source || "",
       observedAt: Number(payload.observedAt) || null,
+      primeStatus,
+      invitationRemainingSeconds,
+      invitationExpiresAt,
+      invitationGrantedAtEstimated,
     },
   };
+}
+
+function optionalInteger(value, min, max) {
+  if (value == null) return null;
+  const number = Number(value);
+  return Number.isInteger(number) && number >= min && number <= max ? number : false;
 }
 
 function normalizeScanSummary(payload) {
@@ -1052,6 +1080,7 @@ function normalizeScanSummary(payload) {
   const startedAt = Number(payload.startedAt);
   const completedAt = Number(payload.completedAt);
   const durationMs = Number(payload.durationMs);
+  const primeStatus = String(payload.primeStatus || "unknown");
   if (!new Set(["full", "partial"]).has(runKind)) return { ok: false, error: "bad_scan_run_kind" };
   if (!new Set(["completed", "blocked", "cancelled", "failed"]).has(outcome)) {
     return { ok: false, error: "bad_scan_outcome" };
@@ -1069,6 +1098,9 @@ function normalizeScanSummary(payload) {
       || durationMs < 0 || durationMs > 12 * 60 * 60 * 1000) {
     return { ok: false, error: "bad_scan_timing" };
   }
+  if (!["prime", "non_prime", "unknown"].includes(primeStatus)) {
+    return { ok: false, error: "bad_prime_status" };
+  }
   return {
     ok: true,
     item: {
@@ -1085,6 +1117,7 @@ function normalizeScanSummary(payload) {
       startedAt,
       completedAt,
       durationMs,
+      primeStatus,
     },
   };
 }
@@ -1094,8 +1127,8 @@ function scanSummaryStatement(env, instanceId, item) {
   return env.DB.prepare(
     `INSERT INTO scan_completions_hourly
        (hour, instance_id, run_kind, outcome, successful, extension_version,
-        checked, expected, errors, started_at, completed_at, duration_ms)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        checked, expected, errors, started_at, completed_at, duration_ms, prime_status)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
      ON CONFLICT(hour, instance_id, run_kind) DO UPDATE SET
        outcome = excluded.outcome,
        successful = excluded.successful,
@@ -1105,12 +1138,13 @@ function scanSummaryStatement(env, instanceId, item) {
        errors = excluded.errors,
        started_at = excluded.started_at,
        completed_at = excluded.completed_at,
-       duration_ms = excluded.duration_ms
+       duration_ms = excluded.duration_ms,
+       prime_status = excluded.prime_status
      WHERE scan_completions_hourly.successful = 0 OR excluded.successful = 1`,
   ).bind(
     hour, instanceId, item.runKind, item.outcome, item.successful,
     item.extensionVersion, item.checked, item.expected, item.errors,
-    item.startedAt, item.completedAt, item.durationMs,
+    item.startedAt, item.completedAt, item.durationMs, item.primeStatus,
   );
 }
 
@@ -1122,8 +1156,10 @@ function feedbackStatements(env, instanceId, items) {
     statements.push(env.DB.prepare(
     `INSERT OR IGNORE INTO feedback_hourly
        (hour, instance_id, marketplace, asin, state, source,
-        first_observed_at, last_observed_at, first_received_at, last_received_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        first_observed_at, last_observed_at, first_received_at, last_received_at,
+        prime_status, invitation_remaining_seconds, invitation_expires_at,
+        invitation_granted_at_estimated)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
   ).bind(
     hour,
     instanceId,
@@ -1135,13 +1171,19 @@ function feedbackStatements(env, instanceId, items) {
     item.observedAt,
     now,
     now,
+    item.primeStatus,
+    item.invitationRemainingSeconds,
+    item.invitationExpiresAt,
+    item.invitationGrantedAtEstimated,
   ));
 
   if (RAW_FEEDBACK_STATES.has(item.state) || item.source === "auto_request") {
     statements.push(env.DB.prepare(
       `INSERT INTO extension_feedback
-         (instance_id, marketplace, asin, state, source, observed_at, received_at, ip_hash)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+         (instance_id, marketplace, asin, state, source, observed_at, received_at, ip_hash,
+          prime_status, invitation_remaining_seconds, invitation_expires_at,
+          invitation_granted_at_estimated)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     ).bind(
       instanceId,
       item.marketplace,
@@ -1151,6 +1193,10 @@ function feedbackStatements(env, instanceId, items) {
       item.observedAt,
       now,
       null,
+      item.primeStatus,
+      item.invitationRemainingSeconds,
+      item.invitationExpiresAt,
+      item.invitationGrantedAtEstimated,
     ));
   }
   }

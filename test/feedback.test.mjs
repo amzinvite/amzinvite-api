@@ -128,11 +128,24 @@ assert.equal(autoRequest.batches[0].length, 2);
 const grouped = makeEnv();
 const groupedResponse = await worker.fetch(await signedBatchRequest([
   { asin: "B0TEST0001", marketplace: "amazon.fr", state: "not_invitation", source: "bg_check" },
-  { asin: "B0TEST0002", marketplace: "amazon.fr", state: "accepted", source: "bg_check" },
+  {
+    asin: "B0TEST0002",
+    marketplace: "amazon.fr",
+    state: "accepted",
+    source: "bg_check",
+    primeStatus: "prime",
+    invitationRemainingSeconds: 53400,
+    invitationExpiresAt: 1789806653,
+    invitationGrantedAtEstimated: 1789547453,
+  },
 ]), grouped.env, {});
 assert.equal(groupedResponse.status, 200);
 assert.equal((await groupedResponse.json()).accepted, 2);
 assert.equal(grouped.batches[0].length, 3, "deux agrégats horaires et un événement accepté brut");
+assert.equal(grouped.batches[0][1].args[10], "prime");
+assert.equal(grouped.batches[0][1].args[11], 53400);
+assert.equal(grouped.batches[0][2].args[8], "prime");
+assert.equal(grouped.batches[0][2].args[11], 1789547453);
 
 const completed = makeEnv();
 const completedResponse = await worker.fetch(await signedBatchRequest([], {
@@ -145,12 +158,14 @@ const completedResponse = await worker.fetch(await signedBatchRequest([], {
   startedAt: 1786780800,
   completedAt: 1786782600,
   durationMs: 1800000,
+  primeStatus: "non_prime",
 }), completed.env, {});
 assert.equal(completedResponse.status, 200);
 assert.deepEqual(await completedResponse.json(), { ok: true, accepted: 0, scan_summary: true });
 assert.equal(completed.batches[0].length, 1, "un résumé sans produit reste une seule écriture");
 assert.match(completed.batches[0][0].sql, /INSERT INTO scan_completions_hourly/);
 assert.equal(completed.batches[0][0].args[4], 1, "le succès complet est calculé côté Worker");
+assert.equal(completed.batches[0][0].args[12], "non_prime");
 
 const invalidSummary = makeEnv();
 const invalidResponse = await worker.fetch(await signedBatchRequest([], {

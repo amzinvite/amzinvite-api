@@ -43,7 +43,12 @@ CREATE TABLE IF NOT EXISTS extension_feedback (
   source         TEXT,                -- bg_check | manual_visit | auto_request
   observed_at    INTEGER,
   received_at    INTEGER NOT NULL,
-  ip_hash        TEXT                 -- historique, plus alimenté
+  ip_hash        TEXT,                -- historique, plus alimenté
+  prime_status   TEXT NOT NULL DEFAULT 'unknown'
+                 CHECK (prime_status IN ('prime', 'non_prime', 'unknown')),
+  invitation_remaining_seconds INTEGER,
+  invitation_expires_at INTEGER,
+  invitation_granted_at_estimated INTEGER
 );
 CREATE INDEX IF NOT EXISTS idx_feedback_received_at ON extension_feedback(received_at DESC);
 
@@ -60,6 +65,11 @@ CREATE TABLE IF NOT EXISTS feedback_hourly (
   last_observed_at  INTEGER,
   first_received_at INTEGER NOT NULL,
   last_received_at  INTEGER NOT NULL,
+  prime_status      TEXT NOT NULL DEFAULT 'unknown'
+                    CHECK (prime_status IN ('prime', 'non_prime', 'unknown')),
+  invitation_remaining_seconds INTEGER,
+  invitation_expires_at INTEGER,
+  invitation_granted_at_estimated INTEGER,
   PRIMARY KEY (hour, instance_id, marketplace, asin, state, source)
 ) WITHOUT ROWID;
 CREATE INDEX IF NOT EXISTS idx_feedback_hourly_accepted_hour
@@ -84,6 +94,8 @@ CREATE TABLE IF NOT EXISTS scan_completions_hourly (
   started_at        INTEGER NOT NULL,
   completed_at      INTEGER NOT NULL,
   duration_ms       INTEGER NOT NULL,
+  prime_status      TEXT NOT NULL DEFAULT 'unknown'
+                    CHECK (prime_status IN ('prime', 'non_prime', 'unknown')),
   PRIMARY KEY (hour, instance_id, run_kind)
 ) WITHOUT ROWID;
 CREATE INDEX IF NOT EXISTS idx_scan_completions_hourly_summary
