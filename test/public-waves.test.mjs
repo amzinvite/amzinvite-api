@@ -18,6 +18,12 @@ function makeEnv() {
         if (sql.includes("INSERT INTO public_wave_snapshots")) {
           return { bind() { return this; }, async run() { return { success: true }; } };
         }
+        if (sql.includes("FROM wave_materialization_state")) {
+          return { bind() { return this; }, async first() { return null; } };
+        }
+        if (/INSERT (?:OR IGNORE )?INTO wave_(?:product|active|eligible|materialization)/.test(sql)) {
+          return { sql, bind() { return this; } };
+        }
         if (sql.includes("FROM invitation_waves")) {
           return {
             async all() {
@@ -35,25 +41,17 @@ function makeEnv() {
           };
         }
         assert.match(sql, /configured_bounds/);
-        assert.doesNotMatch(sql, /accepted_runs/);
-        assert.match(sql, /state IN \('available', 'accepted'\)/);
-        assert.match(sql, /s\.signal_at >= b\.started_at - 900/);
-        assert.match(sql, /s\.signal_at < b\.ended_at \+ 10800/);
-        assert.match(sql, /b\.ended_at/);
-        assert.match(sql, /MIN\(s\.signal_at\) AS detected_at/);
-        assert.match(sql, /HAVING COUNT\(DISTINCT s\.instance_id\) >= 1/);
-        assert.match(sql, /LEFT JOIN acceptance_events/);
-        assert.doesNotMatch(sql, /selected_product_summary/);
-        assert.match(sql, /CASE WHEN a\.instance_id IS NOT NULL/);
-        assert.match(sql, /a\.marketplace = p\.marketplace AND a\.asin = p\.asin/);
-        assert.doesNotMatch(sql, /COUNT\(DISTINCT p\.asin\) AS products/);
+        assert.match(sql, /JOIN wave_product_instances/);
+        assert.match(sql, /JOIN wave_active_instances/);
+        assert.match(sql, /FROM wave_eligible_instances/);
+        assert.doesNotMatch(sql, /FROM feedback_hourly/);
         assert.match(sql, /c\.last_used_at - c\.created_at > 3600/);
         assert.match(sql, /FROM invitation_wave_products archived_product/);
         assert.match(sql, /archived_product\.marketplace = p\.marketplace/);
         assert.match(sql, /archived_product\.asin = p\.asin/);
         assert.match(sql, /ORDER BY archived_wave\.started_at DESC/);
         return {
-          bind(cutoff, slots) {
+          bind(slots, cutoff) {
             assert.ok(Number.isFinite(cutoff));
             const parsedSlots = JSON.parse(slots);
             assert.equal(parsedSlots.length, 1, "seule la vague active doit être calculée");
@@ -84,6 +82,14 @@ function makeEnv() {
             ] };
           },
         };
+      },
+      async batch(statements) {
+        assert.equal(statements.length, 4);
+        assert.match(statements[0].sql, /INSERT INTO wave_product_instances/);
+        assert.match(statements[1].sql, /INSERT OR IGNORE INTO wave_active_instances/);
+        assert.match(statements[2].sql, /INSERT OR IGNORE INTO wave_eligible_instances/);
+        assert.match(statements[3].sql, /INSERT INTO wave_materialization_state/);
+        return statements.map(() => ({ success: true }));
       },
     },
   };
