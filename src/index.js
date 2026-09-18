@@ -182,6 +182,33 @@ export function withPreopenedWave(payload, nowEpoch = Math.floor(Date.now() / 10
   };
 }
 
+export function withConfiguredEmptyWaves(payload, slots, nowEpoch = Math.floor(Date.now() / 1000)) {
+  const waves = Array.isArray(payload?.waves) ? [...payload.waves] : [];
+  const knownIds = new Set(waves.map((wave) => String(wave.id)));
+  const knownStarts = new Set(waves.map((wave) => Number(wave.started_at)));
+  for (const slot of slots || []) {
+    if (nowEpoch < Number(slot.started_at) - PUBLIC_WAVE_PREOPEN_SECONDS
+        || nowEpoch >= Number(slot.ended_at)
+        || knownIds.has(String(slot.id))
+        || knownStarts.has(Number(slot.started_at))) continue;
+    waves.push({
+      id: String(slot.id),
+      started_at: Number(slot.started_at),
+      detected_at: Number(slot.started_at),
+      ended_at: Number(slot.ended_at),
+      finalized: false,
+      installations: 0,
+      active_users: 0,
+      selected_users: 0,
+      validations: 0,
+      products: 0,
+      selection_rate: 0,
+      items: [],
+    });
+  }
+  return { ...payload, waves: waves.sort((left, right) => right.started_at - left.started_at) };
+}
+
 export function normalizeObservationPrice(value) {
   if (value == null || value === "") return null;
   const normalized = Number(value);
@@ -555,13 +582,13 @@ async function handlePublicWaves(env, ctx, { bypassCache = false } = {}) {
     wavesById.set(id, wave);
   }
 
-  const payload = withPreopenedWave({
+  const payload = withConfiguredEmptyWaves(withPreopenedWave({
     generated_at: now,
     next_refresh_at: nextWaveRefreshAt(waveSlots, now),
     window_days: retentionDays,
     methodology: "Statistiques anonymes amzinvite, dédupliquées par installation durable et ASIN. Une installation est confirmée après plus d’une heure de réutilisation du même identifiant anonyme.",
     waves: Array.from(wavesById.values()).sort((a, b) => b.started_at - a.started_at),
-  }, now);
+  }, now), waveSlots, now);
   const responseHeaders = {
     "Cache-Control": publicWavesCacheControl(payload),
     "X-Amzinvite-Cache": "MISS",

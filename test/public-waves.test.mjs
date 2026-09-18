@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import worker, { canonicalWaveSlots, withPreopenedWave } from "../src/index.js";
+import worker, { canonicalWaveSlots, withConfiguredEmptyWaves, withPreopenedWave } from "../src/index.js";
 
 const originalCaches = globalThis.caches;
 const originalDateNow = Date.now;
@@ -123,6 +123,21 @@ try {
   assert.equal(preopened.waves[0].started_at, Date.parse("2026-08-07T08:00:00Z") / 1000);
   assert.equal(preopened.waves[0].products, 0);
   assert.deepEqual(preopened.waves[0].items, []);
+
+  const manualEmpty = withConfiguredEmptyWaves(
+    { generated_at: 1, waves: [] },
+    [{
+      id: "manual-pokemon-30",
+      started_at: Date.parse("2026-09-18T08:00:00Z") / 1000,
+      ended_at: Date.parse("2026-09-19T08:00:00Z") / 1000,
+      source: "manual",
+    }],
+    Date.parse("2026-09-18T08:00:01Z") / 1000,
+  );
+  assert.equal(manualEmpty.waves.length, 1);
+  assert.equal(manualEmpty.waves[0].id, "manual-pokemon-30");
+  assert.equal(manualEmpty.waves[0].products, 0);
+  assert.deepEqual(manualEmpty.waves[0].items, []);
 
   globalThis.caches = undefined;
   const response = await worker.fetch(new Request("https://api.test/api/public/waves"), makeEnv(), {});
