@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 
-import worker, { persistFinalizedWaves } from "../src/index.js";
+import worker, { isWaveRefreshDue, nextWaveRefreshAt, persistFinalizedWaves, waveRefreshMinuteOffsets } from "../src/index.js";
 
 const NOW_MS = Date.UTC(2026, 7, 3, 12, 0, 0);
 const originalNow = Date.now;
@@ -41,11 +41,20 @@ try {
   assert.equal(statements[0].args[0], Math.floor(NOW_MS / 1000) - 14 * 86400);
 
   statements.length = 0;
-  await worker.scheduled({ cron: "*/15 * * * *" }, env, {
+  await worker.scheduled({ cron: "* * * * *" }, env, {
     waitUntil(promise) { scheduledPromise = promise; },
   });
   await scheduledPromise;
   assert.equal(statements.length, 0, "le cron d'archivage ne doit pas lancer la purge quotidienne");
+
+  assert.deepEqual(waveRefreshMinuteOffsets(24 * 60), [
+    0, 1, 2, 3, 4, 5, 10, 15, 20, 25, 30, 45, 60,
+    180, 360, 540, 720, 900, 1080, 1260, 1440,
+  ]);
+  const scheduledWave = { starts_at: 1_000_000, ends_at: 1_000_000 + 24 * 3600 };
+  assert.equal(isWaveRefreshDue([scheduledWave], 1_000_000 + 9 * 3600), true);
+  assert.equal(isWaveRefreshDue([scheduledWave], 1_000_000 + 10 * 3600), false);
+  assert.equal(nextWaveRefreshAt([scheduledWave], 1_000_000 + 10 * 3600), 1_000_000 + 12 * 3600);
 
   const archiveStatements = [];
   const archivedIds = new Set();

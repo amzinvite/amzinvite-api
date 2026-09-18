@@ -549,6 +549,7 @@ async function handlePublicWaves(env, ctx, { bypassCache = false } = {}) {
 
   const payload = withPreopenedWave({
     generated_at: now,
+    next_refresh_at: nextWaveRefreshAt(waveSlots, now),
     window_days: retentionDays,
     methodology: "Statistiques anonymes amzinvite, dédupliquées par installation durable et ASIN. Une installation est confirmée après plus d’une heure de réutilisation du même identifiant anonyme.",
     waves: Array.from(wavesById.values()).sort((a, b) => b.started_at - a.started_at),
@@ -689,7 +690,13 @@ export function upcomingWaveSlots(nowEpoch, count = 6) {
 }
 
 async function runScheduledMaintenance(env, cron = null) {
-  const shouldArchive = cron == null || cron === "*/15 * * * *";
+  let shouldArchive = cron == null;
+  let scheduledSlots = null;
+  if (cron === "* * * * *" && env.WAVE_ARCHIVE_ENABLED !== "false") {
+    const now = Math.floor(Date.now() / 1000);
+    scheduledSlots = await configuredWaveSlots(env, now, now - 3 * 86400);
+    shouldArchive = isWaveRefreshDue(scheduledSlots, now);
+  }
   const shouldPurge = cron == null || cron === "17 3 * * *";
   if (shouldArchive && env.WAVE_ARCHIVE_ENABLED !== "false") {
     try {
@@ -697,7 +704,7 @@ async function runScheduledMaintenance(env, cron = null) {
       // Le cron est le seul producteur du snapshot partagé pendant une vague.
       // Hors de la fenêtre active, le snapshot final reste valide et aucune
       // agrégation lourde n'est nécessaire.
-      const refreshWindowOpen = canonicalWaveSlots(now, now - 2 * 86400).some(
+      const refreshWindowOpen = (scheduledSlots || await configuredWaveSlots(env, now, now - 2 * 86400)).some(
         (slot) => now >= slot.started_at - 900 && now <= slot.ended_at + 3 * 3600,
       );
       if (refreshWindowOpen) {
@@ -717,6 +724,39 @@ async function runScheduledMaintenance(env, cron = null) {
     }
   }
   if (shouldPurge && env.DATA_RETENTION_ENABLED !== "false") await purgeExpiredData(env);
+}
+
+export function waveRefreshMinuteOffsets(durationMinutes = 24 * 60) {
+  const duration = Math.max(1, Math.floor(Number(durationMinutes) || 24 * 60));
+  const offsets = new Set([0, 1, 2, 3, 4, 5, 10, 15, 20, 25, 30, 45, 60]);
+  for (let offset = 180; offset < duration; offset += 180) offsets.add(offset);
+  offsets.add(duration);
+  return [...offsets].filter((offset) => offset <= duration).sort((left, right) => left - right);
+}
+
+export function isWaveRefreshDue(waves, nowEpoch = Math.floor(Date.now() / 1000)) {
+  return (waves || []).some((wave) => {
+    const startedAt = Number(wave.starts_at);
+    const endedAt = Number(wave.ends_at);
+    if (!Number.isFinite(startedAt) || !Number.isFinite(endedAt) || nowEpoch < startedAt) return false;
+    const durationMinutes = Math.max(1, Math.ceil((endedAt - startedAt) / 60));
+    const elapsedMinutes = Math.floor((nowEpoch - startedAt) / 60);
+    return waveRefreshMinuteOffsets(durationMinutes).includes(elapsedMinutes);
+  });
+}
+
+export function nextWaveRefreshAt(waves, nowEpoch = Math.floor(Date.now() / 1000)) {
+  const candidates = [];
+  for (const wave of waves || []) {
+    const startedAt = Number(wave.starts_at);
+    const endedAt = Number(wave.ends_at);
+    if (!Number.isFinite(startedAt) || !Number.isFinite(endedAt) || nowEpoch >= endedAt) continue;
+    const durationMinutes = Math.max(1, Math.ceil((endedAt - startedAt) / 60));
+    const nextOffset = waveRefreshMinuteOffsets(durationMinutes)
+      .find((offset) => startedAt + offset * 60 > nowEpoch);
+    if (nextOffset != null) candidates.push(startedAt + nextOffset * 60);
+  }
+  return candidates.length ? Math.min(...candidates) : null;
 }
 
 export async function persistFinalizedWaves(env, waves) {

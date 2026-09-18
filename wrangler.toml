@@ -62,8 +62,10 @@ DATA_RETENTION_ENABLED = "true"
 DATA_RETENTION_DAYS = "14"
 
 [triggers]
-# Archivage des vagues toutes les 15 minutes ; purge de rétention une fois par jour.
-crons = ["*/15 * * * *", "17 3 * * *"]
+# Réveil léger chaque minute : l'agrégation D1 ne s'exécute qu'aux jalons
+# T+0..5 min, puis 10/15/20/25/30/45/60 min et toutes les 3 h jusqu'à la fin.
+# La purge de rétention reste quotidienne.
+crons = ["* * * * *", "17 3 * * *"]
 
 [observability]
 enabled = true
