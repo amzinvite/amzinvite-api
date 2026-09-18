@@ -99,6 +99,11 @@ function publicWavesCacheControl(payload) {
     : `public, max-age=300, s-maxage=${PUBLIC_WAVES_CACHE_TTL_SEC}, stale-while-revalidate=3600`;
 }
 
+function hasCurrentRefreshMetadata(payload) {
+  const hasLiveWave = Array.isArray(payload?.waves) && payload.waves.some((wave) => !wave.finalized);
+  return !hasLiveWave || Object.prototype.hasOwnProperty.call(payload, "next_refresh_at");
+}
+
 function parisParts(date) {
   const parts = new Intl.DateTimeFormat("fr-FR", {
     timeZone: PARIS_TIME_ZONE,
@@ -272,10 +277,12 @@ async function handlePublicWaves(env, ctx, { bypassCache = false } = {}) {
   const cached = cache && !bypassCache ? await cache.match(cacheKey) : null;
   if (cached) {
     const cachedPayload = withPreopenedWave(await cached.json());
-    return json(cachedPayload, 200, {
-      "Cache-Control": publicWavesCacheControl(cachedPayload),
-      "X-Amzinvite-Cache": "HIT",
-    });
+    if (hasCurrentRefreshMetadata(cachedPayload)) {
+      return json(cachedPayload, 200, {
+        "Cache-Control": publicWavesCacheControl(cachedPayload),
+        "X-Amzinvite-Cache": "HIT",
+      });
+    }
   }
 
   // Le Cache API est local à chaque datacenter. Sans ce snapshot partagé,
@@ -289,6 +296,7 @@ async function handlePublicWaves(env, ctx, { bypassCache = false } = {}) {
     if (snapshot?.payload) {
       try {
         const snapshotPayload = withPreopenedWave(JSON.parse(snapshot.payload));
+        if (!hasCurrentRefreshMetadata(snapshotPayload)) throw new Error("outdated live snapshot");
         const snapshotHeaders = {
           "Cache-Control": publicWavesCacheControl(snapshotPayload),
           "X-Amzinvite-Cache": "D1-SNAPSHOT",

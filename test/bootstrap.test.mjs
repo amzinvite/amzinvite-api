@@ -70,6 +70,7 @@ try {
     default: {
       async match() {
         return new Response(JSON.stringify({
+          next_refresh_at: null,
           waves: [{ id: "wave-final", finalized: true, ended_at: 1, selected_users: 12, products: 2 }],
         }));
       },

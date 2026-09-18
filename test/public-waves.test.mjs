@@ -156,7 +156,7 @@ try {
   globalThis.caches = {
     default: {
       async match() {
-        return new Response(JSON.stringify({ generated_at: 1, waves: [] }));
+        return new Response(JSON.stringify({ generated_at: 1, next_refresh_at: null, waves: [] }));
       },
       async put() {},
     },
@@ -171,7 +171,7 @@ try {
 
   globalThis.caches = undefined;
   let snapshotReads = 0;
-  const snapshotPayload = { generated_at: 123, waves: [] };
+  const snapshotPayload = { generated_at: 123, next_refresh_at: null, waves: [] };
   const snapshotted = await worker.fetch(new Request("https://api.test/api/public/waves"), {
     DB: {
       prepare(sql) {
