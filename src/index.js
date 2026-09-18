@@ -659,8 +659,8 @@ async function manualWaveSlots(env, nowEpoch, cutoffEpoch = nowEpoch - 7 * 86400
   ).bind(cutoffEpoch, nowEpoch + 30 * 86400).all();
   return (result.results || []).map((wave) => ({
     id: String(wave.id),
-    starts_at: Number(wave.starts_at),
-    ends_at: Number(wave.ends_at),
+    started_at: Number(wave.starts_at),
+    ended_at: Number(wave.ends_at),
     label: String(wave.label || "Vague exceptionnelle"),
     source: "manual",
   }));
@@ -669,7 +669,7 @@ async function manualWaveSlots(env, nowEpoch, cutoffEpoch = nowEpoch - 7 * 86400
 export async function configuredWaveSlots(env, nowEpoch, cutoffEpoch = nowEpoch - 7 * 86400) {
   const slots = [...canonicalWaveSlots(nowEpoch, cutoffEpoch), ...await manualWaveSlots(env, nowEpoch, cutoffEpoch)];
   const unique = new Map(slots.map((slot) => [String(slot.id), slot]));
-  return [...unique.values()].sort((left, right) => left.starts_at - right.starts_at);
+  return [...unique.values()].sort((left, right) => left.started_at - right.started_at);
 }
 
 export function upcomingWaveSlots(nowEpoch, count = 6) {
@@ -744,8 +744,8 @@ export function waveRefreshMinuteOffsets(durationMinutes = 24 * 60) {
 
 export function isWaveRefreshDue(waves, nowEpoch = Math.floor(Date.now() / 1000)) {
   return (waves || []).some((wave) => {
-    const startedAt = Number(wave.starts_at);
-    const endedAt = Number(wave.ends_at);
+    const startedAt = Number(wave.started_at);
+    const endedAt = Number(wave.ended_at);
     if (!Number.isFinite(startedAt) || !Number.isFinite(endedAt) || nowEpoch < startedAt) return false;
     const durationMinutes = Math.max(1, Math.ceil((endedAt - startedAt) / 60));
     const elapsedMinutes = Math.floor((nowEpoch - startedAt) / 60);
@@ -754,16 +754,15 @@ export function isWaveRefreshDue(waves, nowEpoch = Math.floor(Date.now() / 1000)
 }
 
 export function nextWaveRefreshAt(waves, nowEpoch = Math.floor(Date.now() / 1000)) {
-  const candidates = [];
-  for (const wave of waves || []) {
-    const startedAt = Number(wave.starts_at);
-    const endedAt = Number(wave.ends_at);
-    if (!Number.isFinite(startedAt) || !Number.isFinite(endedAt) || nowEpoch >= endedAt) continue;
+  const candidates = (waves || []).flatMap(({ started_at: rawStartedAt, ended_at: rawEndedAt }) => {
+    const startedAt = Number(rawStartedAt);
+    const endedAt = Number(rawEndedAt);
+    if (!Number.isFinite(startedAt) || !Number.isFinite(endedAt) || nowEpoch >= endedAt) return [];
     const durationMinutes = Math.max(1, Math.ceil((endedAt - startedAt) / 60));
     const nextOffset = waveRefreshMinuteOffsets(durationMinutes)
       .find((offset) => startedAt + offset * 60 > nowEpoch);
-    if (nextOffset != null) candidates.push(startedAt + nextOffset * 60);
-  }
+    return nextOffset == null ? [] : [startedAt + nextOffset * 60];
+  });
   return candidates.length ? Math.min(...candidates) : null;
 }
 
@@ -995,7 +994,13 @@ async function handleExtensionBootstrap(request, env, ctx) {
     schedule: {
       version: "2026-08-15.1",
       timezone: PARIS_TIME_ZONE,
-      waves: await configuredWaveSlots(env, now, now - 4 * 86400),
+      waves: (await configuredWaveSlots(env, now, now - 4 * 86400)).map((wave) => ({
+        id: wave.id,
+        starts_at: wave.started_at,
+        ends_at: wave.ended_at,
+        label: wave.label || "",
+        source: wave.source || "scheduled",
+      })),
       // Un seul premier scan par installation entre T+0 et T+29. Environ 10 %
       // des installations servent de canaris pendant les deux premières minutes;
       // les autres sont réparties de façon stable jusqu'à T+29. Les scans plus

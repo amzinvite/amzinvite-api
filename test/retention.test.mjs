@@ -51,7 +51,7 @@ try {
     0, 1, 2, 3, 4, 5, 10, 15, 20, 25, 30, 45, 60,
     180, 360, 540, 720, 900, 1080, 1260, 1440,
   ]);
-  const scheduledWave = { starts_at: 1_000_000, ends_at: 1_000_000 + 24 * 3600 };
+  const scheduledWave = { started_at: 1_000_000, ended_at: 1_000_000 + 24 * 3600 };
   assert.equal(isWaveRefreshDue([scheduledWave], 1_000_000 + 9 * 3600), true);
   assert.equal(isWaveRefreshDue([scheduledWave], 1_000_000 + 10 * 3600), false);
   assert.equal(nextWaveRefreshAt([scheduledWave], 1_000_000 + 10 * 3600), 1_000_000 + 12 * 3600);

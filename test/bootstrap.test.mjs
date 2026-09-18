@@ -36,8 +36,8 @@ const configured = await configuredWaveSlots({
 }, manualStart + 3600, manualStart - 86400);
 assert.deepEqual(configured.find((slot) => slot.id === "manual-test"), {
   id: "manual-test",
-  starts_at: manualStart,
-  ends_at: manualStart + 86400,
+  started_at: manualStart,
+  ended_at: manualStart + 86400,
   label: "Vague manuelle",
   source: "manual",
 });
