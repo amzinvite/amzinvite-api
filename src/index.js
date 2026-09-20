@@ -59,8 +59,8 @@ const ADMIN_STATS_CACHE_TTL_SEC = 30 * 60;
 const RAW_FEEDBACK_STATES = new Set(["available", "accepted"]);
 const DEFAULT_RETENTION_DAYS = 14;
 const PUBLIC_WAVES_CACHE_TTL_SEC = 5 * 60;
-const PUBLIC_WAVES_CACHE_URL = "https://waves-cache.amzinvite.internal/v18";
-const PUBLIC_WAVES_SNAPSHOT_KEY = "public-waves-v18";
+const PUBLIC_WAVES_CACHE_URL = "https://waves-cache.amzinvite.internal/v19";
+const PUBLIC_WAVES_SNAPSHOT_KEY = "public-waves-v19";
 const PARIS_TIME_ZONE = "Europe/Paris";
 const CANONICAL_WAVE_SLOTS = Object.freeze([
   { weekday: 1, hour: 22, minute: 0 },
