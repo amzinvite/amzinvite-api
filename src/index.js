@@ -375,7 +375,7 @@ export async function materializeWaveFacts(env, waveSlots, nowEpoch = Math.floor
   }
 }
 
-async function handlePublicWaves(env, ctx, { bypassCache = false } = {}) {
+async function handlePublicWaves(env, ctx, { bypassCache = false, recoveryWaveIds = [] } = {}) {
   const cache = globalThis.caches?.default;
   const cacheKey = new Request(PUBLIC_WAVES_CACHE_URL);
   const cached = cache && !bypassCache ? await cache.match(cacheKey) : null;
@@ -420,8 +420,10 @@ async function handlePublicWaves(env, ctx, { bypassCache = false } = {}) {
   const now = Math.floor(Date.now() / 1000);
   const retentionDays = Math.max(7, Math.min(90, Number.parseInt(env.DATA_RETENTION_DAYS || "14", 10) || 14));
   const archiveCutoff = now - retentionDays * 86400;
+  const recoveryIds = new Set(recoveryWaveIds.map(String));
   const waveSlots = (await configuredWaveSlots(env, now, archiveCutoff)).filter(
-    (slot) => now >= slot.started_at - 900 && now <= slot.ended_at + 3 * 3600,
+    (slot) => (now >= slot.started_at - 900 && now <= slot.ended_at + 3 * 3600)
+      || recoveryIds.has(String(slot.id)),
   );
   // Les vagues terminées sont servies depuis invitation_waves. Le calcul
   // dynamique ne doit donc parcourir que la vague active (et J-1, nécessaire
@@ -787,12 +789,12 @@ export function upcomingWaveSlots(nowEpoch, count = 6) {
 async function runScheduledMaintenance(env, cron = null) {
   let shouldArchive = cron == null;
   let scheduledSlots = null;
-  let hasUnarchivedEndedWave = false;
+  let recoveryWaveIds = [];
   if (cron === "* * * * *" && env.WAVE_ARCHIVE_ENABLED !== "false") {
     const now = Math.floor(Date.now() / 1000);
     scheduledSlots = await configuredWaveSlots(env, now, now - 3 * 86400);
-    hasUnarchivedEndedWave = await hasEndedWaveToArchive(env, scheduledSlots, now);
-    shouldArchive = isWaveRefreshDue(scheduledSlots, now) || hasUnarchivedEndedWave;
+    recoveryWaveIds = await endedWaveIdsToArchive(env, scheduledSlots, now);
+    shouldArchive = isWaveRefreshDue(scheduledSlots, now) || recoveryWaveIds.length > 0;
   }
   const shouldPurge = cron == null || cron === "17 3 * * *";
   if (shouldArchive && env.WAVE_ARCHIVE_ENABLED !== "false") {
@@ -803,11 +805,11 @@ async function runScheduledMaintenance(env, cron = null) {
       // agrégation lourde n'est nécessaire.
       const refreshWindowOpen = (scheduledSlots || await configuredWaveSlots(env, now, now - 2 * 86400)).some(
         (slot) => now >= slot.started_at - 900 && now <= slot.ended_at + 3 * 3600,
-      ) || hasUnarchivedEndedWave;
+      ) || recoveryWaveIds.length > 0;
       if (refreshWindowOpen) {
         // Le cron doit relire les compteurs courants, sans reprendre une réponse
         // publique potentiellement mise en cache juste avant la fin de vague.
-        const response = await handlePublicWaves(env, {}, { bypassCache: true });
+        const response = await handlePublicWaves(env, {}, { bypassCache: true, recoveryWaveIds });
         if (response.ok) {
           const payload = await response.json();
           const archived = await persistFinalizedWaves(env, payload.waves || []);
@@ -823,15 +825,16 @@ async function runScheduledMaintenance(env, cron = null) {
   if (shouldPurge && env.DATA_RETENTION_ENABLED !== "false") await purgeExpiredData(env);
 }
 
-export async function hasEndedWaveToArchive(env, waves, nowEpoch = Math.floor(Date.now() / 1000)) {
+export async function endedWaveIdsToArchive(env, waves, nowEpoch = Math.floor(Date.now() / 1000)) {
+  const ids = [];
   for (const wave of waves || []) {
     if (Number(wave.ended_at) > nowEpoch) continue;
     const archived = await env.DB.prepare(
       "SELECT 1 FROM invitation_waves WHERE id = ?1 LIMIT 1",
     ).bind(String(wave.id)).first();
-    if (!archived) return true;
+    if (!archived) ids.push(String(wave.id));
   }
-  return false;
+  return ids;
 }
 
 export function waveRefreshMinuteOffsets(durationMinutes = 24 * 60) {

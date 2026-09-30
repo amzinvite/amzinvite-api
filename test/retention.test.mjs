@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 
-import worker, { hasEndedWaveToArchive, isWaveRefreshDue, nextWaveRefreshAt, persistFinalizedWaves, waveRefreshMinuteOffsets } from "../src/index.js";
+import worker, { endedWaveIdsToArchive, isWaveRefreshDue, nextWaveRefreshAt, persistFinalizedWaves, waveRefreshMinuteOffsets } from "../src/index.js";
 
 const NOW_MS = Date.UTC(2026, 7, 3, 12, 0, 0);
 const originalNow = Date.now;
@@ -71,14 +71,14 @@ try {
       },
     },
   };
-  assert.equal(await hasEndedWaveToArchive(catchupEnv, [
+  assert.deepEqual(await endedWaveIdsToArchive(catchupEnv, [
     { id: "already-archived", ended_at: Math.floor(NOW_MS / 1000) - 7200 },
     { id: "missed-finalization", ended_at: Math.floor(NOW_MS / 1000) - 3600 },
-  ]), true, "une clôture ratée doit être reprise après son minuteur exact");
-  assert.equal(await hasEndedWaveToArchive(catchupEnv, [
+  ]), ["missed-finalization"], "une clôture ratée doit être reprise après son minuteur exact");
+  assert.deepEqual(await endedWaveIdsToArchive(catchupEnv, [
     { id: "already-archived", ended_at: Math.floor(NOW_MS / 1000) - 7200 },
     { id: "still-open", ended_at: Math.floor(NOW_MS / 1000) + 3600 },
-  ]), false, "une vague archivée ou encore ouverte ne doit pas déclencher de reprise");
+  ]), [], "une vague archivée ou encore ouverte ne doit pas déclencher de reprise");
 
   const archiveStatements = [];
   const archivedIds = new Set();
