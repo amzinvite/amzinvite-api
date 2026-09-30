@@ -814,6 +814,10 @@ async function runScheduledMaintenance(env, cron = null) {
           const payload = await response.json();
           const archived = await persistFinalizedWaves(env, payload.waves || []);
           if (archived > 0) {
+            // Le premier calcul précède nécessairement l'archivage et contient
+            // donc encore finalized=false. Le reconstruire depuis l'archive
+            // évite de figer ce statut obsolète dans le snapshot D1 partagé.
+            await handlePublicWaves(env, {}, { bypassCache: true });
             await globalThis.caches?.default?.delete?.(new Request(PUBLIC_WAVES_CACHE_URL));
           }
         }
