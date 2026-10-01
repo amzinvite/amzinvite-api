@@ -1,5 +1,10 @@
 import assert from "node:assert/strict";
-import worker, { canonicalWaveSlots, withConfiguredEmptyWaves, withPreopenedWave } from "../src/index.js";
+import worker, {
+  canonicalWaveSlots,
+  configuredWaveSlots,
+  withConfiguredEmptyWaves,
+  withPreopenedWave,
+} from "../src/index.js";
 
 const originalCaches = globalThis.caches;
 const originalDateNow = Date.now;
@@ -115,6 +120,32 @@ try {
     Date.parse("2026-08-14T00:00:00Z") / 1000,
   ).find((slot) => slot.started_at === Date.parse("2026-08-14T08:00:00Z") / 1000);
   assert.equal(extendedWave.ended_at, Date.parse("2026-08-15T16:00:00Z") / 1000);
+
+  const overlapStart = Date.parse("2026-09-30T08:00:00Z") / 1000;
+  const overlapEnd = Date.parse("2026-10-01T08:00:00Z") / 1000;
+  const overlappingSlots = await configuredWaveSlots({
+    DB: {
+      prepare(sql) {
+        assert.match(sql, /FROM manual_wave_schedule/);
+        return {
+          bind() { return this; },
+          async all() {
+            return { results: [{
+              id: "manual-20260930-amazon",
+              starts_at: overlapStart,
+              ends_at: overlapEnd,
+              label: "Vague Amazon du 30 septembre 2026",
+            }] };
+          },
+        };
+      },
+    },
+  }, Date.parse("2026-10-01T08:01:00Z") / 1000, Date.parse("2026-09-29T00:00:00Z") / 1000);
+  const exactWindow = overlappingSlots.filter(
+    (slot) => slot.started_at === overlapStart && slot.ended_at === overlapEnd,
+  );
+  assert.equal(exactWindow.length, 1, "un créneau manuel ne doit pas doubler une vague canonique");
+  assert.equal(exactWindow[0].id, String(overlapStart), "le créneau canonique reste la référence");
 
   const beforePreopen = withPreopenedWave(
     { generated_at: 1, waves: [] },

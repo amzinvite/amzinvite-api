@@ -756,8 +756,21 @@ async function manualWaveSlots(env, nowEpoch, cutoffEpoch = nowEpoch - 7 * 86400
 }
 
 export async function configuredWaveSlots(env, nowEpoch, cutoffEpoch = nowEpoch - 7 * 86400) {
-  const slots = [...canonicalWaveSlots(nowEpoch, cutoffEpoch), ...await manualWaveSlots(env, nowEpoch, cutoffEpoch)];
-  const unique = new Map(slots.map((slot) => [String(slot.id), slot]));
+  const canonicalSlots = canonicalWaveSlots(nowEpoch, cutoffEpoch);
+  const manualSlots = await manualWaveSlots(env, nowEpoch, cutoffEpoch);
+  const slots = [...canonicalSlots, ...manualSlots];
+  const unique = new Map();
+  const occupiedWindows = new Set();
+  for (const slot of slots) {
+    const windowKey = `${Number(slot.started_at)}:${Number(slot.ended_at)}`;
+    // Une vague manuelle peut exceptionnellement recouvrir un créneau régulier.
+    // Dans ce cas le créneau canonique, ajouté en premier, reste la seule source
+    // de faits : matérialiser deux IDs puis les fusionner par started_at doublait
+    // chaque produit et pouvait bloquer l'archivage de fin de vague.
+    if (occupiedWindows.has(windowKey)) continue;
+    occupiedWindows.add(windowKey);
+    unique.set(String(slot.id), slot);
+  }
   return [...unique.values()].sort((left, right) => left.started_at - right.started_at);
 }
 
