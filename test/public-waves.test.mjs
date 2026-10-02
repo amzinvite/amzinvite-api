@@ -223,6 +223,25 @@ try {
   assert.equal((await cached.json()).waves.length, 1);
   assert.equal(reads, 0);
 
+  globalThis.caches = {
+    default: {
+      async match() {
+        return new Response(JSON.stringify({
+          generated_at: 1,
+          next_refresh_at: Math.floor(Date.now() / 1000) - 1,
+          waves: [{ id: "stale-live", finalized: false, items: [] }],
+        }));
+      },
+      async put() {},
+    },
+  };
+  const recovered = await worker.fetch(new Request("https://api.test/api/public/waves"), makeEnv(), {});
+  assert.equal(recovered.headers.get("X-Amzinvite-Cache"), "MISS");
+  const recoveredPayload = await recovered.json();
+  assert.equal(recoveredPayload.generated_at, Math.floor(Date.now() / 1000));
+  assert.ok(recoveredPayload.next_refresh_at > recoveredPayload.generated_at,
+    "une échéance dépassée doit forcer le recalcul au lieu de figer le snapshot live");
+
   globalThis.caches = undefined;
   let snapshotReads = 0;
   const snapshotPayload = { generated_at: 123, next_refresh_at: 9_999_999_999, waves: [] };
