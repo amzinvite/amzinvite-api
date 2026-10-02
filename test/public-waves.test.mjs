@@ -52,6 +52,8 @@ function makeEnv() {
         assert.doesNotMatch(sql, /FROM feedback_hourly/);
         assert.match(sql, /c\.last_used_at - c\.created_at > 3600/);
         assert.match(sql, /FROM invitation_wave_products archived_product/);
+        assert.match(sql, /i\.image_url AS catalog_image_url/);
+        assert.match(sql, /COALESCE\(\s*x\.image_url,\s*p\.catalog_image_url,/);
         assert.match(sql, /archived_product\.marketplace = p\.marketplace/);
         assert.match(sql, /archived_product\.asin = p\.asin/);
         assert.match(sql, /ORDER BY archived_wave\.started_at DESC/);

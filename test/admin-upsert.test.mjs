@@ -36,6 +36,7 @@ const response = await worker.fetch(new Request("https://api.test/api/admin/upse
       asin: "b0test0001",
       url: "https://www.amazon.fr/dp/B0TEST0001",
       name: "Test",
+      image_url: "https://prixtcg.fr/images/p1018.png?v=test",
       active: true,
     }, {
       asin: "b0test0001",
@@ -53,10 +54,12 @@ assert.equal(response.status, 200);
 assert.equal(batchStatements.length, 2);
 assert.match(batchStatements[0].sql, /WHERE invitations\.first_seen IS NOT excluded\.first_seen/);
 assert.equal(batchStatements[0].args[0], "B0TEST0001");
-assert.equal(batchStatements[0].args[4], null);
-assert.equal(batchStatements[0].args[3], "amazon.fr");
-assert.equal(batchStatements[1].args[3], "amazon.com.be");
-assert.equal(batchStatements[1].args[10], 1);
+assert.equal(batchStatements[0].args[5], null);
+assert.equal(batchStatements[0].args[3], "https://prixtcg.fr/images/p1018.png?v=test");
+assert.equal(batchStatements[0].args[4], "amazon.fr");
+assert.equal(batchStatements[1].args[4], "amazon.com.be");
+assert.equal(batchStatements[1].args[11], 1);
+assert.ok(runStatements.some((statement) => /DELETE FROM public_wave_snapshots/.test(statement.sql)));
 
 const monitoringSnapshot = await worker.fetch(new Request("https://api.test/api/admin/upsert", {
   method: "POST",

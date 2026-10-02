@@ -486,6 +486,7 @@ async function handlePublicWaves(env, ctx, { bypassCache = false, recoveryWaveId
      ), product_summary AS (
        SELECT b.wave_id, product.marketplace, product.asin,
               COALESCE(i.name, m.name, product.asin) AS name,
+              i.image_url AS catalog_image_url,
               COUNT(DISTINCT CASE
                 WHEN p.accepted_at >= b.started_at - 900 AND p.accepted_at < b.ended_at
                 THEN p.instance_id END)
@@ -503,7 +504,7 @@ async function handlePublicWaves(env, ctx, { bypassCache = false, recoveryWaveId
          LEFT JOIN monitoring_products m
            ON m.marketplace = product.marketplace AND m.asin = product.asin
         GROUP BY b.wave_id, product.marketplace, product.asin,
-                 COALESCE(i.name, m.name, product.asin)
+                 COALESCE(i.name, m.name, product.asin), i.image_url
      ), eligible_summary AS (
        SELECT e.wave_id, e.marketplace, e.asin, COUNT(e.instance_id) AS eligible_users
          FROM wave_eligible_instances e
@@ -530,6 +531,7 @@ async function handlePublicWaves(env, ctx, { bypassCache = false, recoveryWaveId
             COALESCE(e.eligible_users, p.selected_users) AS eligible_users,
             COALESCE(
               x.image_url,
+              p.catalog_image_url,
               (
                 SELECT archived_product.image_url
                   FROM invitation_wave_products archived_product
@@ -1618,12 +1620,13 @@ async function handleAdminUpsert(request, env) {
     return json({ error: "bad_marketplaces" }, 400);
   }
   const stmts = normalizedInvitations.map((inv) => env.DB.prepare(
-    `INSERT INTO invitations (asin, url, name, marketplace, first_seen, last_updated, active, is_mirror)
-     VALUES (?, ?, ?, ?, COALESCE(?, (SELECT first_seen FROM invitations WHERE marketplace = ? AND asin = ?), ?), ?, ?, ?)
+    `INSERT INTO invitations (asin, url, name, image_url, marketplace, first_seen, last_updated, active, is_mirror)
+     VALUES (?, ?, ?, ?, ?, COALESCE(?, (SELECT first_seen FROM invitations WHERE marketplace = ? AND asin = ?), ?), ?, ?, ?)
      ON CONFLICT(marketplace, asin) DO UPDATE SET
        first_seen = excluded.first_seen,
        url = excluded.url,
        name = excluded.name,
+       image_url = excluded.image_url,
        marketplace = excluded.marketplace,
        last_updated = excluded.last_updated,
        active = excluded.active,
@@ -1631,6 +1634,7 @@ async function handleAdminUpsert(request, env) {
      WHERE invitations.first_seen IS NOT excluded.first_seen
         OR invitations.url IS NOT excluded.url
         OR invitations.name IS NOT excluded.name
+        OR invitations.image_url IS NOT excluded.image_url
         OR invitations.marketplace IS NOT excluded.marketplace
         OR invitations.active IS NOT excluded.active
         OR invitations.is_mirror IS NOT excluded.is_mirror`,
@@ -1638,6 +1642,7 @@ async function handleAdminUpsert(request, env) {
     inv.asin,
     inv.url,
     inv.name || null,
+    safePublicAmazonImage(inv.image_url),
     inv.marketplace || "amazon.fr",
     inv.first_seen,
     inv.marketplace,
@@ -1693,6 +1698,10 @@ async function handleAdminUpsert(request, env) {
         : env.DB.prepare("UPDATE monitoring_products SET active = 0, last_updated = ? WHERE marketplace = ? AND active = 1").bind(now, marketplace);
       await statement.run();
     }
+  }
+
+  if (stmts.length > 0) {
+    await clearWaveCaches(env);
   }
 
   return json({
