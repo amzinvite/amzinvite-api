@@ -53,10 +53,9 @@ period = 60
 #
 # Pas besoin de les déclarer ici, mais on les liste pour mémoire.
 
-# Authentification stricte du feed public : les requêtes non signées et les
-# signatures legacy sont rejetées.
+# Les signatures legacy de l'extension sont rejetées. Le feed public accepte
+# aussi les lectures web anonymes, limitées par IP dans le Worker.
 [vars]
-FEED_AUTH_ENFORCE = "true"
 EXTENSION_LEGACY_AUTH_ENABLED = "false"
 DATA_RETENTION_ENABLED = "true"
 DATA_RETENTION_DAYS = "14"

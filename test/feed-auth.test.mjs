@@ -1,4 +1,5 @@
-// Tests de non-régression : le feed public exige désormais une requête signée.
+// Tests de non-régression : le feed public accepte le web anonyme et valide
+// strictement toute signature fournie par l'extension.
 // Mocke env.DB (D1), importe le worker et appelle worker.fetch.
 //
 // Lancer : node test/feed-auth.test.mjs
@@ -15,7 +16,6 @@ const V2_SECRET = "random-install-secret-for-tests";
 // ─── Mock D1 : route selon le SQL ──────────────────────────────────────────
 function makeEnv({
   feedRows = [{ asin: "B0TEST00001", url: "https://www.amazon.fr/dp/B0TEST00001" }],
-  enforce = true,
   legacy = true,
   credential = {
     secret: V2_SECRET,
@@ -43,7 +43,6 @@ function makeEnv({
   };
   return {
     DB: db,
-    FEED_AUTH_ENFORCE: enforce ? "true" : "false",
     EXTENSION_LEGACY_AUTH_ENABLED: legacy ? "true" : "false",
     FEED_RATE_LIMITER: { async limit() { return { success: true }; } },
   };
@@ -90,10 +89,11 @@ async function test(name, fn) {
 
 console.log("feed public — protection HMAC :");
 
-await test("refuse une requête sans en-têtes (curl nu) → 401", async () => {
+await test("accepte une lecture web anonyme et la rend publiquement cacheable", async () => {
   const res = await worker.fetch(feedRequest(), makeEnv(), {});
-  assert.equal(res.status, 401);
-  assert.equal((await res.json()).error, "bad_instance_id");
+  assert.equal(res.status, 200);
+  assert.equal((await res.json())[0].asin, "B0TEST00001");
+  assert.match(res.headers.get("Cache-Control") || "", /s-maxage=300/);
 });
 
 await test("refuse un instanceId mal formé → 401", async () => {
@@ -157,14 +157,7 @@ await test("refuse toujours le secret legacy sans bloquer v2", async () => {
   assert.equal(v2Res.status, 200);
 });
 
-await test("période de grâce (enforce=false) : requête non signée → 200", async () => {
-  const res = await worker.fetch(feedRequest(), makeEnv({ enforce: false }), {});
-  assert.equal(res.status, 200);
-  const body = await res.json();
-  assert.ok(Array.isArray(body) && body.length === 1);
-});
-
-await test("réponse signée → pas de cache CDN partagé (no-store)", async () => {
+await test("réponse signée → cache privé no-store", async () => {
   const headers = await v2SignedHeaders();
   const res = await worker.fetch(feedRequest(headers), makeEnv(), {});
   assert.match(res.headers.get("Cache-Control") || "", /no-store/);

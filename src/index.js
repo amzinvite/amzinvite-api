@@ -1,7 +1,7 @@
 // amzinvite-api — Cloudflare Worker
 //
 // Endpoints exposés :
-//   GET  /api/public/invitations       feed curé, requête signée HMAC (anti-scraping)
+//   GET  /api/public/invitations       feed curé public, signatures extension contrôlées
 //   GET  /api/public/waves             statistiques anonymes agrégées des vagues
 //   GET  /api/extension/monitoring     shard de produits Amazon à observer
 //   POST /api/extension/register       délivre un credential HMAC aléatoire
@@ -1006,18 +1006,14 @@ async function handleCredentialRegistration(request, env) {
 // GET /api/public/invitations
 // ─────────────────────────────────────────────────────────────────────────
 async function handlePublicFeed(request, env) {
-  // Le feed expose la liste curée d'ASIN/URL : on exige une requête signée
-  // par l'extension (même schéma HMAC que le feedback) pour éviter qu'un
-  // simple `curl` de l'URL ne récupère la liste. La signature porte sur le
-  // path (pas de body en GET). Le secret reste extractible côté navigateur,
-  // mais ça bloque le scraping anonyme trivial.
-  //
-  // Période de grâce : tant que FEED_AUTH_ENFORCE !== "true", on n'échoue pas
-  // sur une requête non signée (extension < 0.1.14 encore déployée).
-  const enforce = env.FEED_AUTH_ENFORCE === "true";
-  const auth = await checkFeedAuth(request, env);
-  if (!auth.ok && enforce) {
-    return json({ error: auth.error }, 401);
+  // La même liste alimente l'extension et la page publique PrixTCG. Une
+  // extension qui fournit ses en-têtes reste authentifiée strictement ; un
+  // lecteur web anonyme est accepté et borné par IP via le rate limiter.
+  const hasAuthHeaders = ["X-Instance-Id", "X-Ts", "X-Sig", "X-Credential-Id"]
+    .some((header) => request.headers.has(header));
+  if (hasAuthHeaders) {
+    const auth = await checkFeedAuth(request, env);
+    if (!auth.ok) return json({ error: auth.error }, 401);
   }
 
   const feedLimit = await env.FEED_RATE_LIMITER.limit({
@@ -1037,21 +1033,24 @@ async function handlePublicFeed(request, env) {
   if (!marketplaces.length) return json({ error: "bad_marketplaces" }, 400);
   const placeholders = marketplaces.map(() => "?").join(", ");
   const result = await env.DB.prepare(
-    `SELECT asin, url, name, marketplace, first_seen, is_mirror
+    `SELECT asin, url, name, marketplace, first_seen, is_mirror, image_url
      FROM invitations
      WHERE active = 1 AND marketplace IN (${placeholders})
      ORDER BY first_seen DESC
      LIMIT 200`,
   ).bind(...marketplaces).all();
-  return new Response(JSON.stringify(result.results || []), {
+  const invitations = (result.results || []).map((item) => ({
+    ...item,
+    image_url: safePublicAmazonImage(item.image_url),
+  }));
+  return new Response(JSON.stringify(invitations), {
     status: 200,
     headers: {
       ...CORS_HEADERS,
       "Content-Type": "application/json",
-      // Réponse signée/par-instance : surtout pas de cache CDN partagé,
-      // sinon Cloudflare resservirait le JSON en clair sans vérifier la
-      // signature (le cache ne varie pas sur les en-têtes).
-      "Cache-Control": "no-store",
+      "Cache-Control": hasAuthHeaders
+        ? "private, no-store"
+        : "public, max-age=60, s-maxage=300, stale-while-revalidate=600",
     },
   });
 }
