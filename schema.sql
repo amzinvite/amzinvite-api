@@ -9,6 +9,7 @@ CREATE TABLE IF NOT EXISTS invitations (
   asin           TEXT NOT NULL,
   url            TEXT NOT NULL,
   name           TEXT,
+  image_url      TEXT,
   marketplace    TEXT DEFAULT 'amazon.fr',
   first_seen     INTEGER NOT NULL,    -- epoch seconds
   last_updated   INTEGER NOT NULL,
